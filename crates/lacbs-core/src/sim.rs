@@ -7,6 +7,7 @@
 
 use crate::model::{Class, Config, Finished, Rejected, Report, Request};
 use crate::policy::Policy;
+use crate::rng::Lcg;
 
 const STEP_BUDGET: u64 = 500_000;
 
@@ -51,6 +52,8 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
     let mut running: Vec<Seq> = Vec::new();
     let mut report = Report::default();
     let mut time = waiting.first().map_or(0, |s| s.req.arrival_us);
+    let mut rng = Lcg::new(cfg.retry_seed);
+    let mut next_id = waiting.iter().map(|s| s.req.id).max().unwrap_or(0) + 1;
 
     loop {
         if report.steps > STEP_BUDGET {
@@ -71,11 +74,14 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         }
         let mut pool: Vec<Seq> = waiting.drain(..available_end).collect();
 
-        // A. 拒绝：已经无望的请求不再占算力
-        if cfg.reject_hopeless {
+        // A. 拒绝：装不下的（prompt+output 超过 KV 上限）永远拒绝；无望的按开关拒绝
+        {
             let mut i = 0;
             while i < pool.len() {
-                if hopeless(&pool[i], time, &cfg) {
+                let infeasible = cfg
+                    .kv_capacity_tokens
+                    .is_some_and(|cap| pool[i].req.prompt_tokens + pool[i].req.output_tokens > cap);
+                if infeasible || (cfg.reject_hopeless && hopeless(&pool[i], time, &cfg)) {
                     let s = pool.remove(i);
                     report.rejected.push(Rejected {
                         id: s.req.id,
@@ -83,6 +89,9 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
                         arrival_us: s.req.arrival_us,
                         rejected_at_us: time,
                     });
+                    if maybe_retry(&s.req, time, &cfg, &mut rng, &mut next_id, &mut waiting) {
+                        report.retries += 1;
+                    }
                 } else {
                     i += 1;
                 }
@@ -112,6 +121,26 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             }
         }
 
+        // B2. KV 驻留压力：超上限时挤掉占 KV 最大的批处理序列
+        if let Some(cap) = cfg.kv_capacity_tokens {
+            loop {
+                let resident = resident_tokens(&running);
+                let decode_need = running.iter().filter(|s| s.prefill_done()).count() as u32;
+                if resident + decode_need <= cap {
+                    break;
+                }
+                let Some(vi) = pick_kv_victim(&running) else {
+                    break;
+                };
+                let mut v = running.remove(vi);
+                report.preemptions += 1;
+                report.recomputed_tokens += u64::from(v.req.prompt_tokens) + u64::from(v.generated);
+                v.prefilled = 0;
+                v.last_token_at = time;
+                cooled.push(v);
+            }
+        }
+
         // C. 预算：先保底已有序列的 decode，再给 prefill
         let decode_set: Vec<usize> = (0..running.len())
             .filter(|&i| running[i].prefill_done())
@@ -122,13 +151,18 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         let decode_now = decode_set.len() as u32;
         let mut budget = cfg.max_step_tokens - decode_now;
         let mut prefill_tokens = 0u32;
+        let mut kv_left = match cfg.kv_capacity_tokens {
+            Some(cap) => cap.saturating_sub(resident_tokens(&running) + decode_now),
+            None => u32::MAX,
+        };
 
         // D. 续跑上次没切完的 prefill（在途优先）
         for &i in &partial {
             let need = running[i].req.prompt_tokens - running[i].prefilled;
-            let take = chunk_for(policy, &cfg, need).min(budget);
+            let take = chunk_for(policy, &cfg, need).min(budget).min(kv_left);
             running[i].prefilled += take;
             budget -= take;
+            kv_left -= take;
             prefill_tokens += take;
         }
 
@@ -140,12 +174,13 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             };
             let mut job = pool.remove(pos);
             let need = job.req.prompt_tokens - job.prefilled;
-            let take = chunk_for(policy, &cfg, need).min(budget);
+            let take = chunk_for(policy, &cfg, need).min(budget).min(kv_left);
             if take == 0 {
                 pool.insert(pos, job);
                 break;
             }
             budget -= take;
+            kv_left -= take;
             prefill_tokens += take;
             job.prefilled += take;
             if job.first_admit_at.is_none() {
@@ -185,6 +220,14 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             running.push(job);
         }
 
+        if let Some(cap) = cfg.kv_capacity_tokens {
+            let resident = resident_tokens(&running);
+            report.max_resident_tokens = report.max_resident_tokens.max(resident);
+            if resident > cap {
+                report.kv_overshoot_steps += 1;
+            }
+        }
+
         // I. 收尾
         let mut i = 0;
         while i < running.len() {
@@ -209,6 +252,50 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
     report.finished.sort_by_key(|f| f.id);
     report.rejected.sort_by_key(|r| r.id);
     Ok(report)
+}
+
+fn resident_tokens(running: &[Seq]) -> u32 {
+    running.iter().map(|s| s.prefilled + s.generated).sum()
+}
+
+/// KV 压力下优先挤出占地最大的批处理序列。
+fn pick_kv_victim(running: &[Seq]) -> Option<usize> {
+    running
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.req.class == Class::Batch)
+        .max_by_key(|(_, s)| (s.prefilled + s.generated, s.req.id))
+        .map(|(i, _)| i)
+}
+
+fn maybe_retry(
+    req: &Request,
+    now: u64,
+    cfg: &Config,
+    rng: &mut Lcg,
+    next_id: &mut u32,
+    waiting: &mut Vec<Seq>,
+) -> bool {
+    let cap = cfg.max_attempts.max(1);
+    if cfg.retry_prob_pct == 0 || req.attempt.saturating_add(1) >= cap {
+        return false;
+    }
+    if !rng.pct(cfg.retry_prob_pct) {
+        return false;
+    }
+    let mut r = *req;
+    r.attempt += 1;
+    r.id = *next_id;
+    *next_id += 1;
+    let extra = if cfg.retry_delay_us > 1 {
+        u64::from(rng.next_u32() % cfg.retry_delay_us as u32)
+    } else {
+        0
+    };
+    r.arrival_us = now + cfg.retry_delay_us + extra;
+    let at = waiting.partition_point(|s| (s.req.arrival_us, s.req.id) < (r.arrival_us, r.id));
+    waiting.insert(at, Seq::new(r));
+    true
 }
 
 /// 先在候选里做老化插队（等待超过 factor×自身首字 SLO 的最老者优先），否则走策略本身。

@@ -1,7 +1,6 @@
 //! M1 扫描：固定 profile 跑完整轨迹，按"到达阶段"归属达标数，逐阶段取最优得到 oracle。
 //! 判据：最好的单一 profile 距离 oracle 的差距 <3% ⇒ 自适应层不值得做（见 docs/ADAPTIVE-DESIGN.md）。
 
-use lacbs_core::metrics::oracle_gap;
 use lacbs_core::model::Config;
 use lacbs_core::profile::ProfileId;
 use lacbs_core::sim;
@@ -10,25 +9,29 @@ use lacbs_core::trace::{self, Trace};
 struct Row {
     profile: ProfileId,
     met_by_phase: Vec<usize>,
+    rejected_by_phase: Vec<i64>,
     met: usize,
     rejected: usize,
+    retries: u64,
     recompute: u64,
+    kv_peak: u32,
+    kv_over: u64,
     max_wait_us: u64,
 }
 
-pub fn run(seed: u64, base: Config) -> anyhow::Result<()> {
+pub fn run(seed: u64, base: Config, reject_penalty: f64) -> anyhow::Result<()> {
     for trace in trace::traces() {
         // 只跑 8ms/step 这一档：0.37ms 档下所有 profile 都被容量淹没，测不出差别
         let cfg = Config {
             decode_us_per_seq: 500,
             ..base
         };
-        one(&trace, seed, cfg)?;
+        one(&trace, seed, cfg, reject_penalty)?;
     }
     Ok(())
 }
 
-fn one(trace: &Trace, seed: u64, cfg: Config) -> anyhow::Result<()> {
+fn one(trace: &Trace, seed: u64, cfg: Config, reject_penalty: f64) -> anyhow::Result<()> {
     let reqs = trace::generate(seed, &trace.phases, &cfg);
     let starts = phase_starts(trace);
     let secs = trace.duration_us() as f64 / 1e6;
@@ -49,9 +52,13 @@ fn one(trace: &Trace, seed: u64, cfg: Config) -> anyhow::Result<()> {
                 rows.push(Row {
                     profile: pid,
                     met_by_phase: vec![0; starts.len()],
+                    rejected_by_phase: vec![0; starts.len()],
                     met: 0,
                     rejected: 0,
+                    retries: 0,
                     recompute: 0,
+                    kv_peak: 0,
+                    kv_over: 0,
                     max_wait_us: 0,
                 });
                 continue;
@@ -63,22 +70,33 @@ fn one(trace: &Trace, seed: u64, cfg: Config) -> anyhow::Result<()> {
                 met_by_phase[phase_of(f.arrival_us, &starts)] += 1;
             }
         }
+        let mut rejected_by_phase = vec![0i64; starts.len()];
+        for x in &r.rejected {
+            rejected_by_phase[phase_of(x.arrival_us, &starts)] += 1;
+        }
         let row = Row {
             profile: pid,
             met_by_phase,
+            rejected_by_phase,
             met: r.met_both(),
             rejected: r.rejected.len(),
+            retries: r.retries,
             recompute: r.recomputed_tokens,
+            kv_peak: r.max_resident_tokens,
+            kv_over: r.kv_overshoot_steps,
             max_wait_us: r.max_wait_us(),
         };
         println!(
-            "ROW trace={} profile={} met={} goodput={:.2}/s rejected={} recompute={} max_wait_ms={:.1} by_phase={}",
+            "ROW trace={} profile={} met={} goodput={:.2}/s rejected={} retries={} recompute={} kv_peak={} kv_over={} max_wait_ms={:.1} by_phase={}",
             trace.name,
             pid.as_str(),
             row.met,
             row.met as f64 / secs,
             row.rejected,
+            row.retries,
             row.recompute,
+            row.kv_peak,
+            row.kv_over,
             row.max_wait_us as f64 / 1000.0,
             row.met_by_phase
                 .iter()
@@ -89,31 +107,48 @@ fn one(trace: &Trace, seed: u64, cfg: Config) -> anyhow::Result<()> {
         rows.push(row);
     }
 
-    let best = rows.iter().max_by_key(|r| r.met).expect("profile 列表非空");
+    // 目标：达标数 − penalty × 拒绝数（penalty=0 即 M1 的纯达标口径）
+    let score = |r: &Row, pi: usize| -> f64 {
+        r.met_by_phase[pi] as f64 - reject_penalty * r.rejected_by_phase[pi] as f64
+    };
+    let total = |r: &Row| -> f64 { (0..starts.len()).map(|pi| score(r, pi)).sum() };
 
-    let matrix: Vec<Vec<usize>> = rows.iter().map(|r| r.met_by_phase.clone()).collect();
-    let g = oracle_gap(&matrix);
+    let best = rows
+        .iter()
+        .max_by(|a, b| total(a).partial_cmp(&total(b)).expect("分数非 NaN"))
+        .expect("profile 列表非空");
+
     let mut per_phase = Vec::new();
+    let mut oracle = 0.0f64;
     for pi in 0..starts.len() {
-        let (pid, met) = rows
+        let (pid, sc) = rows
             .iter()
-            .map(|r| (r.profile, r.met_by_phase[pi]))
-            .max_by_key(|&(_, m)| m)
+            .map(|r| (r.profile, score(r, pi)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).expect("分数非 NaN"))
             .expect("profile 列表非空");
+        oracle += sc;
         per_phase.push(format!(
-            "{}={}:{}",
+            "{}={}:{:.0}",
             trace.phases[pi].name,
             pid.as_str(),
-            met
+            sc
         ));
     }
+    let best_sc = total(best);
+    let gap_pct = if oracle.abs() < 1e-9 {
+        0.0
+    } else {
+        (oracle - best_sc) / oracle.abs() * 100.0
+    };
     println!(
-        "SUMMARY trace={} best_fixed={} best_fixed_met={} oracle_met={} gap_pct={:.1} per_phase={}",
+        "SUMMARY trace={} penalty={} best_fixed={} best_score={:.0} best_met={} oracle_score={:.0} gap_pct={:.1} per_phase={}",
         trace.name,
+        reject_penalty,
         best.profile.as_str(),
-        g.best_fixed,
-        g.oracle,
-        g.gap_pct,
+        best_sc,
+        best.met,
+        oracle,
+        gap_pct,
         per_phase.join(",")
     );
     Ok(())

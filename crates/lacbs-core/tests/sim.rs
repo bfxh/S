@@ -14,6 +14,11 @@ fn cfg() -> Config {
         reject_hopeless: false,
         preempt_for_interactive: false,
         aging_factor: None,
+        kv_capacity_tokens: None,
+        retry_prob_pct: 0,
+        retry_delay_us: 0,
+        max_attempts: 1,
+        retry_seed: 1,
     }
 }
 
@@ -187,4 +192,42 @@ fn preemption_is_a_noop_when_nobody_waits() {
     c.preempt_for_interactive = true;
     let r = run(c, Policy::Fifo, reqs).unwrap();
     assert_eq!(r.preemptions, 0, "闲置时不该有抢占");
+}
+
+#[test]
+fn kv_capacity_rejects_infeasible_instead_of_hanging() {
+    let mut c = cfg();
+    c.max_seqs = 4;
+    c.kv_capacity_tokens = Some(64); // 每个请求 prompt+output 都超过 64
+    let reqs = workload();
+    let r = run(c, Policy::Deadline, reqs.clone()).unwrap();
+    assert_eq!(r.finished.len(), 0, "不可行请求不该被硬跑");
+    assert_eq!(r.rejected.len(), reqs.len(), "不可行请求必须全部显式拒绝");
+}
+
+#[test]
+fn retry_is_off_by_default() {
+    let r = run(cfg(), Policy::Deadline, workload()).unwrap();
+    assert_eq!(r.retries, 0);
+}
+
+#[test]
+fn retry_cap_is_respected_and_accounted() {
+    let mut c = cfg();
+    c.reject_hopeless = true;
+    c.retry_prob_pct = 100;
+    c.retry_delay_us = 10_000;
+    c.max_attempts = 2;
+    let reqs = workload();
+    let r = run(c, Policy::Deadline, reqs.clone()).unwrap();
+    assert!(r.retries > 0, "过载 + 100% 重试应当产生重试");
+    assert_eq!(
+        r.servable(),
+        reqs.len() + r.retries as usize,
+        "到达数必须等于完成 + 拒绝"
+    );
+    assert!(
+        r.retries <= r.rejected.len() as u64,
+        "max_attempts=2 时每次拒绝最多再生一次尝试"
+    );
 }

@@ -103,14 +103,14 @@ pc=$(echo "$pre" | grep -o '"preemptions":[0-9]*' | cut -d: -f2)
 
 step "5. M1 扫描：oracle 必须不低于最好固定策略，且 5 条轨迹都要跑出来"
 cargo build -q -p lacbs-sim || red "sim 构建失败"
-if ./target/debug/sim.exe --sweep > "$tmp/sweep.out" 2>&1; then
+if ./target/debug/sim.exe --sweep --kv-tokens 6000 --retry-pct 80 --retry-delay-us 50000 --max-attempts 3 --reject-penalty 1 > "$tmp/sweep.out" 2>&1; then
   n=$(grep -c '^SUMMARY' "$tmp/sweep.out")
   [ "$n" -eq 5 ] || red "SUMMARY 条数 $n != 5"
   if ! awk '/^SUMMARY/ {
         b=-1; o=-1;
         for (i=1;i<=NF;i++) {
-          if ($i ~ /^best_fixed_met=/) { split($i,a,"="); b=a[2]+0 }
-          if ($i ~ /^oracle_met=/) { split($i,a,"="); o=a[2]+0 }
+          if ($i ~ /^best_score=/) { split($i,a,"="); b=a[2]+0 }
+          if ($i ~ /^oracle_score=/) { split($i,a,"="); o=a[2]+0 }
         }
         if (b < 0 || o < 0 || o < b) { print "BAD: " $0; bad=1 }
       } END { exit bad }' "$tmp/sweep.out"; then

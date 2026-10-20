@@ -20,6 +20,8 @@ impl Class {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Request {
     pub id: u32,
+    /// 第几次尝试（0 = 首投；拒绝后客户端重试会 +1，用于封顶重试次数）。
+    pub attempt: u8,
     pub class: Class,
     pub arrival_us: u64,
     pub prompt_tokens: u32,
@@ -54,6 +56,14 @@ pub struct Config {
     pub preempt_for_interactive: bool,
     /// 老化：等待超过 `factor × 自身首字 SLO` 的请求在排序时插队；None = 关闭。
     pub aging_factor: Option<u64>,
+    /// KV 驻留上限（prompt + 已生成 token 的并发总量）；None = 不限。
+    pub kv_capacity_tokens: Option<u32>,
+    /// 被拒绝后客户端重试的概率（百分比）与退避。
+    pub retry_prob_pct: u32,
+    pub retry_delay_us: u64,
+    /// 单次尝试计入上限（含首投）；0/1 表示不重试。
+    pub max_attempts: u8,
+    pub retry_seed: u64,
 }
 
 impl Config {
@@ -73,6 +83,12 @@ impl Config {
         }
         if self.aging_factor == Some(0) {
             return Err("aging_factor 不能为 0".into());
+        }
+        if self.retry_prob_pct > 100 {
+            return Err("retry_prob_pct 必须在 0..=100".into());
+        }
+        if self.kv_capacity_tokens == Some(0) {
+            return Err("kv_capacity_tokens 不能为 0".into());
         }
         Ok(())
     }
@@ -120,6 +136,12 @@ pub struct Report {
     pub preemptions: u64,
     /// 被抢占导致要重算的 token 数（prompt + 已生成长度）。
     pub recomputed_tokens: u64,
+    /// 客户端重试产生的新请求数。
+    pub retries: u64,
+    /// KV 驻留峰值。
+    pub max_resident_tokens: u32,
+    /// KV 上限导致 decode 仍被迫超出的步数（软约束的破例次数）。
+    pub kv_overshoot_steps: u64,
 }
 
 impl Report {
@@ -157,6 +179,10 @@ impl Report {
 
     pub fn class_met_both(&self, class: Class) -> usize {
         self.of_class(class).iter().filter(|f| f.met_both()).count()
+    }
+
+    pub fn servable(&self) -> usize {
+        self.finished.len() + self.rejected.len()
     }
 
     pub fn max_wait_us(&self) -> u64 {

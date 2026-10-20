@@ -18,9 +18,15 @@ fn main() -> anyhow::Result<()> {
         reject_hopeless: false,
         preempt_for_interactive: false,
         aging_factor: None,
+        kv_capacity_tokens: None,
+        retry_prob_pct: 0,
+        retry_delay_us: 0,
+        max_attempts: 1,
+        retry_seed: 1,
     };
 
     let mut sweep = false;
+    let mut reject_penalty = 0.0f64;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().context(format!("{flag} 缺值"));
@@ -67,6 +73,11 @@ fn main() -> anyhow::Result<()> {
             "--decode-us" => cfg.decode_us_per_seq = val()?.parse()?,
             "--prefill-us" => cfg.prefill_us_per_token = val()?.parse()?,
             "--sweep" => sweep = true,
+            "--reject-penalty" => reject_penalty = val()?.parse()?,
+            "--kv-tokens" => cfg.kv_capacity_tokens = Some(val()?.parse()?),
+            "--retry-pct" => cfg.retry_prob_pct = val()?.parse()?,
+            "--retry-delay-us" => cfg.retry_delay_us = val()?.parse()?,
+            "--max-attempts" => cfg.max_attempts = val()?.parse()?,
             "--reject" => cfg.reject_hopeless = true,
             "--preempt" => cfg.preempt_for_interactive = true,
             other => bail!("未知参数: {other}"),
@@ -74,7 +85,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if sweep {
-        return sweep::run(spec.seed, cfg);
+        return sweep::run(spec.seed, cfg, reject_penalty);
     }
 
     let reqs = workload::generate(&spec);

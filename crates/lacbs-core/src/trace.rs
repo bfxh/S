@@ -173,6 +173,7 @@ fn make(rng: &mut Lcg, id: u32, arrival: u64, p: &Phase) -> Request {
     };
     Request {
         id,
+        attempt: 0,
         class,
         arrival_us: arrival,
         prompt_tokens: rng.range(prompt.0, prompt.1),
