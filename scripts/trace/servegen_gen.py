@@ -24,6 +24,8 @@ def main() -> None:
     ap.add_argument("--duration", type=float, default=3600.0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--stride", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=42, help="固定种子，保证可复现")
+    ap.add_argument("--shape", default="standard", choices=["standard", "alt"])
     args = ap.parse_args()
 
     out_path = os.path.abspath(args.out)  # 必须在 chdir 之前解析
@@ -39,9 +41,13 @@ def main() -> None:
     # ServeGen 的内部窗口是固定的（这里 600s 一片），rate_fn 的键必须与之一一对应
     windows = pool.span(0, d).get()
     stamps = sorted(set(w.timestamp for w in windows))
-    shape = [1.0, 3.5, 0.8, 2.5, 1.2, 4.0]
+    shape = (
+        [1.0, 3.5, 0.8, 2.5, 1.2, 4.0]
+        if args.shape == "standard"
+        else [0.5, 4.0, 1.5, 0.5, 4.0, 1.0]
+    )
     rate_fn = {ts: 2.0 * shape[i % len(shape)] for i, ts in enumerate(stamps)}
-    reqs = generate_workload(pool, rate_fn, duration=d)
+    reqs = generate_workload(pool, rate_fn, duration=d, seed=args.seed)
     if not reqs:
         raise SystemExit("ServeGen 没有生成请求")
 

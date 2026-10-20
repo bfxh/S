@@ -1,8 +1,8 @@
 # lacbs — 延迟感知的连续批处理调度器
 
-Rust 实现。**结论：非平稳负载下，单一静态 profile 在合成负载与 BurstGPT 真实窗口上都接近逐阶段 oracle
-（聚合 ~1% / ≤0.1%）；ServeGen 生成负载 3 条里 2 条 ≥5%（合计 2/6，未达重启门槛），
-自适应控制器方向维持结案**。仓内保留调度器内核、profile 评估母线、真实/生成 trace 回放与观测工具。
+Rust 实现。**方向：非平稳负载下的自适应调度。** 合成负载与 BurstGPT 窗口上静态 profile 已接近 oracle；
+但预注册的 ServeGen 批次（6 条、固定 seed）有 **4 条 gap ≥5%**，达到启动线 ⇒
+**M2（规则表控制器 + 安全层）已授权**，尚未实现。内核、profile 评估母线、真实/生成 trace 回放与观测工具已就绪。
 详见 [docs/M1-ORACLE.md](docs/M1-ORACLE.md)、[docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md)。
 
 | 文档 | 内容 |
