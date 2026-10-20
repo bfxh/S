@@ -48,6 +48,10 @@ pub struct Config {
     pub step_overhead_us: u64,
     /// 单次 prefill 的切块上限；0 表示不切块。
     pub chunk_tokens: u32,
+    /// 到服务时已赶不上首字截止期的请求，直接拒绝而不是硬跑。
+    pub reject_hopeless: bool,
+    /// 交互式请求可挤掉批处理序列（KV 丢弃、恢复时重算 prefill）。
+    pub preempt_for_interactive: bool,
 }
 
 impl Config {
@@ -87,14 +91,26 @@ impl Finished {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejected {
+    pub id: u32,
+    pub class: Class,
+    pub arrival_us: u64,
+    pub rejected_at_us: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
     pub finished: Vec<Finished>,
+    pub rejected: Vec<Rejected>,
     pub makespan_us: u64,
     pub max_step_tokens_seen: u32,
     pub steps: u64,
     /// 把 step 成本里的 token 数加起来，用来核对容量没被突破。
     pub total_step_tokens: u64,
+    pub preemptions: u64,
+    /// 被抢占导致要重算的 token 数（prompt + 已生成长度）。
+    pub recomputed_tokens: u64,
 }
 
 impl Report {
@@ -132,6 +148,18 @@ impl Report {
 
     pub fn class_met_both(&self, class: Class) -> usize {
         self.of_class(class).iter().filter(|f| f.met_both()).count()
+    }
+
+    pub fn rejected_of(&self, class: Class) -> usize {
+        self.rejected.iter().filter(|r| r.class == class).count()
+    }
+
+    /// 已接受且两项 SLO 都满足的比例；被拒绝的不算服务成功。
+    pub fn met_ratio(&self, total_requests: usize) -> f64 {
+        if total_requests == 0 {
+            return 0.0;
+        }
+        self.met_both() as f64 / total_requests as f64
     }
 }
 

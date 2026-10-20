@@ -19,9 +19,11 @@ scripts/hud-smoke.sh       # WSL 里让 hud 抓一次执行器停滞
 ## 快速开始
 
 ```bash
-# 调度器内核：两种策略对比
+# 调度器内核：策略对比 / 拒绝 / 抢占
 cargo run -p lacbs-sim -- --policy fifo
 cargo run -p lacbs-sim -- --policy deadline
+cargo run -p lacbs-sim -- --policy deadline --reject
+cargo run -p lacbs-sim -- --policy deadline --scenario flood --late-interactive 4 --preempt
 cargo test -p lacbs-core
 
 # 基线负载
@@ -54,7 +56,8 @@ bash scripts/gate.sh --skip-hotpath
 ```
 
 判据是双向的：停滞场景必须报 `stalls:1`，正常场景必须 `stalls:0`；探针连不上必须退出码 1；
-调度器内核在 4 个 seed 上都要求 `deadline` 的交互式违约严格少于 `fifo`，且批处理违约为 0。
+调度器内核在 4 个 seed 上都要求 `deadline` 的交互式违约严格少于 `fifo`，且批处理违约为 0；
+拒绝开启后被服务者必须零首字违约；flood 场景下开启抢占后交互式违约必须归零。
 反证已做：停滞阈值改到 5s ⇒ `stalls:0`；探针打空端口 ⇒ rc=1；把 EDF 退化成 FIFO ⇒ 内核测试判红。
 
 ## 构建约定

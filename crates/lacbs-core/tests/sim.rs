@@ -11,6 +11,8 @@ fn cfg() -> Config {
         decode_us_per_seq: 20,
         step_overhead_us: 50,
         chunk_tokens: 128,
+        reject_hopeless: false,
+        preempt_for_interactive: false,
     }
 }
 
@@ -107,4 +109,81 @@ fn deadline_policy_cuts_interactive_misses() {
             "seed {seed}: 批处理被排序牺牲了"
         );
     }
+}
+
+fn flood_cfg() -> Config {
+    Config {
+        decode_us_per_seq: 500,
+        ..cfg()
+    }
+}
+
+fn flood_spec(late: u32) -> Spec {
+    Spec {
+        steady: 16,
+        steady_class: Some(Class::Batch),
+        burst: 0,
+        interval_us: 1_000,
+        burst_at_us: 100_000,
+        late_interactive: late,
+        b_output: (128, 256),
+        i_ttft_us: 25_000,
+        i_tpot_us: 20_000,
+        ..Spec::default()
+    }
+}
+
+#[test]
+fn rejection_only_drops_requests_that_would_have_missed() {
+    let reqs = workload();
+    let mut c = cfg();
+    c.reject_hopeless = true;
+    let r = run(c, Policy::Deadline, reqs.clone()).unwrap();
+
+    assert!(!r.rejected.is_empty(), "过载场景应当有人被拒");
+    assert_eq!(
+        r.finished.len() + r.rejected.len(),
+        reqs.len(),
+        "有请求既没完成也没被拒"
+    );
+    let mut ids: Vec<u32> = r.finished.iter().map(|f| f.id).collect();
+    ids.extend(r.rejected.iter().map(|x| x.id));
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), reqs.len(), "同一请求同时出现在完成与拒绝里");
+    assert_eq!(r.ttft_misses(), 0, "拒绝之后仍有人首字超时，拒绝规则没对齐");
+}
+
+#[test]
+fn preemption_protects_late_interactive() {
+    let reqs = workload::generate(&flood_spec(4));
+    let base = run(flood_cfg(), Policy::Deadline, reqs.clone()).unwrap();
+    let mut c = flood_cfg();
+    c.preempt_for_interactive = true;
+    let pre = run(c, Policy::Deadline, reqs).unwrap();
+
+    assert_eq!(base.class_ttft_misses(Class::Interactive), 4);
+    assert_eq!(pre.class_ttft_misses(Class::Interactive), 0);
+    assert!(pre.preemptions > 0, "应该发生抢占");
+    assert!(pre.recomputed_tokens > 0, "抢占必须付出重算代价");
+    assert_eq!(
+        pre.class_ttft_misses(Class::Batch),
+        0,
+        "批处理为抢占买单到超时了"
+    );
+}
+
+#[test]
+fn preemption_is_a_noop_when_nobody_waits() {
+    let spec = Spec {
+        steady: 4,
+        burst: 0,
+        late_interactive: 0,
+        ..Spec::default()
+    };
+    let reqs = workload::generate(&spec);
+    let mut c = cfg();
+    c.preempt_for_interactive = true;
+    let r = run(c, Policy::Fifo, reqs).unwrap();
+    assert_eq!(r.preemptions, 0, "闲置时不该有抢占");
 }

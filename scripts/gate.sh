@@ -81,6 +81,26 @@ elif [ "$e" -ge "$f" ]; then
   red "截止期策略没赢: fifo=$f deadline=$e"
 fi
 
+# 拒绝：无望的直接丢，被服务的人必须全部达标
+rej=$(./target/debug/sim.exe --policy deadline --reject)
+echo "$rej"
+r=$(echo "$rej" | grep -o '"rejected":[0-9]*' | cut -d: -f2)
+m=$(echo "$rej" | grep -o '"ttft_misses":[0-9]*' | head -1 | cut -d: -f2)
+[ "${r:-0}" -gt 0 ] || red "拒绝没生效"
+[ "${m:-1}" -eq 0 ] || red "拒绝后被服务的仍有首字违约: $m"
+
+# 抢占：批处理占满槽位后才到的交互式，必须从"等"变成"挤"
+base=$(./target/debug/sim.exe --policy deadline --scenario flood --late-interactive 4)
+pre=$(./target/debug/sim.exe --policy deadline --scenario flood --late-interactive 4 --preempt)
+echo "$base"
+echo "$pre"
+bm=$(echo "$base" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
+pm=$(echo "$pre" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
+pc=$(echo "$pre" | grep -o '"preemptions":[0-9]*' | cut -d: -f2)
+[ "${bm:-0}" -gt 0 ] || red "flood 基线没违约，测不出抢占"
+[ "${pm:-1}" -eq 0 ] || red "抢占后交互式仍违约: $pm"
+[ "${pc:-0}" -gt 0 ] || red "没有发生抢占"
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
   step "5. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
