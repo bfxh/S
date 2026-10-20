@@ -152,8 +152,22 @@ else
   red "控制器运行失败"
 fi
 
+step "8. 执行层：内核策略跑在 tokio 任务上，必须全部交代且无停滞"
+cargo build -q -p lacbs-exec || red "exec 构建失败"
+out=$(timeout 60 ./target/debug/exec.exe --secs 2 --tasks 64 2>/dev/null | tail -1)
+echo "$out"
+c=$(echo "$out" | grep -o '"completed":[0-9]*' | cut -d: -f2)
+r=$(echo "$out" | grep -o '"rejected":[0-9]*' | cut -d: -f2)
+t=$(echo "$out" | grep -o '"tasks":[0-9]*' | cut -d: -f2)
+if [ -z "$c" ] || [ -z "$r" ] || [ -z "$t" ]; then
+  red "执行层输出解析失败"
+elif [ "$((c + r))" -ne "$t" ]; then
+  red "完成($c)+拒绝($r) != 任务数($t)"
+fi
+echo "$out" | grep -q '"stalls":0' || red "执行层出现停滞"
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
-  step "8. hotpath：报告里必须出现被插桩的函数"
+  step "9. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
     || red "hotpath 报告缺 harness::burn"

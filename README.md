@@ -13,6 +13,7 @@ Rust 实现。**结论：非平稳负载下存在逐阶段 oracle gap（预注�
 | [docs/M1-ORACLE.md](docs/M1-ORACLE.md) | M1/M1.1 实测与结案依据：纯达标口径 gap 0%，可用性口径聚合 ~1% |
 | [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放与预注册批次（4/6 ≥5%） |
 | [docs/M2-RESULT.md](docs/M2-RESULT.md) | M2 规则控制器实测：5/6 劣于静态档，判定不上线 |
+| [docs/EXEC.md](docs/EXEC.md) | 执行层 v0：策略跑在 tokio 任务上，console 可观测 |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
 | [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 
@@ -24,6 +25,7 @@ crates/lacbs-sim           # 场景跑分二进制（--policy fifo|deadline）
 crates/lacbs-obs           # 观测装配，一个工具一个 feature
 crates/lacbs-harness       # 合成负载（decode / prefill / mixed / stall）
 crates/lacbs-console-probe # tokio-console 的无头探针（可判红）
+crates/lacbs-exec          # 执行层：内核策略跑在 tokio 任务上（v0，无抢占）
 scripts/gate.sh            # 全量门禁
 scripts/hud-smoke.sh       # WSL 里让 hud 抓一次执行器停滞
 ```

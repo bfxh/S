@@ -1,0 +1,23 @@
+[package]
+name = "lacbs-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "exec"
+path = "src/main.rs"
+
+[features]
+default = []
+console = ["lacbs-obs/console"]
+dial9 = ["lacbs-obs/dial9"]
+liveliness = ["lacbs-obs/liveliness"]
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+lacbs-core = { path = "../lacbs-core" }
+lacbs-obs = { path = "../lacbs-obs", default-features = false }

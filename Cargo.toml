@@ -6,6 +6,7 @@ members = [
     "crates/lacbs-obs",
     "crates/lacbs-harness",
     "crates/lacbs-console-probe",
+    "crates/lacbs-exec",
 ]
 
 [workspace.package]

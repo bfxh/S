@@ -873,6 +873,17 @@ name = "lacbs-core"
 version = "0.1.0"
 
 [[package]]
+name = "lacbs-exec"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lacbs-core",
+ "lacbs-obs",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lacbs-harness"
 version = "0.1.0"
 dependencies = [
