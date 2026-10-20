@@ -1,8 +1,14 @@
 # lacbs — 延迟感知的连续批处理调度器
 
-Rust 实现。**当前阶段：观测面就绪 + 调度器内核 v0（纯模拟）**，尚未接真实推理后端。
+Rust 实现。**当前方向：非平稳 LLM 负载下的自适应调度（两时间尺度闭环）**。
+当前状态：观测面就绪 + 调度器内核（FIFO/EDF、拒绝、抢占，纯模拟），执行层未接。
 
-工具矩阵与实测证据见 [docs/TOOLING.md](docs/TOOLING.md)；内核模型与读数见 [docs/SCHEDULER.md](docs/SCHEDULER.md)。
+| 文档 | 内容 |
+|---|---|
+| [docs/RESEARCH-ADAPTIVE.md](docs/RESEARCH-ADAPTIVE.md) | 文献与项目分析：vLLM/Sarathi/Llumnix/DistServe/H-MAS，证据分级与空白 |
+| [docs/ADAPTIVE-DESIGN.md](docs/ADAPTIVE-DESIGN.md) | 自适应设计：信号、profile 空间、控制器、安全不变量、评估与 kill criteria |
+| [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
+| [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 
 ## 布局
 
