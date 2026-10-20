@@ -1,0 +1,20 @@
+[package]
+name = "lacbs-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[features]
+hotpath = ["lacbs-obs/hotpath", "dep:hotpath"]
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+lacbs-obs = { path = "../lacbs-obs", default-features = false }
+hotpath = { version = "0.28.6", features = ["hotpath"], optional = true }

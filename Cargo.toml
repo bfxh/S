@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/lacbs-obs", "crates/lacbs-harness", "crates/lacbs-console-probe"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+anyhow = "1"
+
+[profile.dev]
+debug = 1
+
+[profile.bench]
+debug = 1

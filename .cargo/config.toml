@@ -1,0 +1,4 @@
+[build]
+# 本机内存常只剩 2-3 GB，并发编 rustc 会把整机拖到卡死
+jobs = 1
+rustflags = ["--cfg", "tokio_unstable"]
