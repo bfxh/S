@@ -7,6 +7,7 @@ Rust 实现。**当前方向：非平稳 LLM 负载下的自适应调度（两�
 |---|---|
 | [docs/RESEARCH-ADAPTIVE.md](docs/RESEARCH-ADAPTIVE.md) | 文献与项目分析：vLLM/Sarathi/Llumnix/DistServe/H-MAS，证据分级与空白 |
 | [docs/ADAPTIVE-DESIGN.md](docs/ADAPTIVE-DESIGN.md) | 自适应设计：信号、profile 空间、控制器、安全不变量、评估与 kill criteria |
+| [docs/M1-ORACLE.md](docs/M1-ORACLE.md) | M1 实测：5 条轨迹上最好固定策略与逐阶段 oracle 的 gap 全为 0% |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
 | [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 

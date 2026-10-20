@@ -13,6 +13,7 @@ fn cfg() -> Config {
         chunk_tokens: 128,
         reject_hopeless: false,
         preempt_for_interactive: false,
+        aging_factor: None,
     }
 }
 

@@ -52,6 +52,8 @@ pub struct Config {
     pub reject_hopeless: bool,
     /// 交互式请求可挤掉批处理序列（KV 丢弃、恢复时重算 prefill）。
     pub preempt_for_interactive: bool,
+    /// 老化：等待超过 `factor × 自身首字 SLO` 的请求在排序时插队；None = 关闭。
+    pub aging_factor: Option<u64>,
 }
 
 impl Config {
@@ -69,6 +71,9 @@ impl Config {
         if self.prefill_us_per_token == 0 || self.decode_us_per_seq == 0 {
             return Err("成本必须为正，否则时间不前进".into());
         }
+        if self.aging_factor == Some(0) {
+            return Err("aging_factor 不能为 0".into());
+        }
         Ok(())
     }
 }
@@ -81,6 +86,10 @@ pub struct Finished {
     pub ttft_us: u64,
     pub finish_us: u64,
     pub tpot_us: u64,
+    /// 从到达到首次被准入的等待时长。
+    pub wait_us: u64,
+    /// 相邻 token 的最大间隔（抢占重算造成的停顿会体现在这里，平均值会把它稀释）。
+    pub max_gap_us: u64,
     pub met_ttft: bool,
     pub met_tpot: bool,
 }
@@ -148,6 +157,10 @@ impl Report {
 
     pub fn class_met_both(&self, class: Class) -> usize {
         self.of_class(class).iter().filter(|f| f.met_both()).count()
+    }
+
+    pub fn max_wait_us(&self) -> u64 {
+        self.finished.iter().map(|f| f.wait_us).max().unwrap_or(0)
     }
 
     pub fn rejected_of(&self, class: Class) -> usize {

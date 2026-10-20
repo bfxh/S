@@ -1,3 +1,5 @@
+mod sweep;
+
 use anyhow::{Context, bail};
 use lacbs_core::model::{Class, Config};
 use lacbs_core::policy::Policy;
@@ -15,8 +17,10 @@ fn main() -> anyhow::Result<()> {
         chunk_tokens: 128,
         reject_hopeless: false,
         preempt_for_interactive: false,
+        aging_factor: None,
     };
 
+    let mut sweep = false;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().context(format!("{flag} 缺值"));
@@ -62,10 +66,15 @@ fn main() -> anyhow::Result<()> {
             "--chunk" => cfg.chunk_tokens = val()?.parse()?,
             "--decode-us" => cfg.decode_us_per_seq = val()?.parse()?,
             "--prefill-us" => cfg.prefill_us_per_token = val()?.parse()?,
+            "--sweep" => sweep = true,
             "--reject" => cfg.reject_hopeless = true,
             "--preempt" => cfg.preempt_for_interactive = true,
             other => bail!("未知参数: {other}"),
         }
+    }
+
+    if sweep {
+        return sweep::run(spec.seed, cfg);
     }
 
     let reqs = workload::generate(&spec);

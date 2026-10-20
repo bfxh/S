@@ -8,12 +8,16 @@
 use crate::model::{Class, Config, Finished, Rejected, Report, Request};
 use crate::policy::Policy;
 
+const STEP_BUDGET: u64 = 500_000;
+
 struct Seq {
     req: Request,
     prefilled: u32,
     generated: u32,
     first_token_at: Option<u64>,
     last_token_at: u64,
+    first_admit_at: Option<u64>,
+    max_gap_us: u64,
 }
 
 impl Seq {
@@ -24,6 +28,8 @@ impl Seq {
             generated: 0,
             first_token_at: None,
             last_token_at: req.arrival_us,
+            first_admit_at: None,
+            max_gap_us: 0,
         }
     }
 
@@ -47,6 +53,13 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
     let mut time = waiting.first().map_or(0, |s| s.req.arrival_us);
 
     loop {
+        if report.steps > STEP_BUDGET {
+            return Err(format!(
+                "步数超过预算 {STEP_BUDGET}（时间 {} µs，剩余 {} 个请求）",
+                time,
+                running.len() + waiting.len()
+            ));
+        }
         if running.is_empty() && waiting.is_empty() {
             break;
         }
@@ -122,8 +135,9 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         // E. 新准入（不再抢占，避免同一步反复腾挪）
         let mut admitted: Vec<Seq> = Vec::new();
         while budget > 0 && running.len() + admitted.len() < cfg.max_seqs {
-            let reqs: Vec<&Request> = pool.iter().map(|s| &s.req).collect();
-            let Some(pos) = policy.pick(&reqs) else { break };
+            let Some(pos) = pick(policy, &pool, time, &cfg) else {
+                break;
+            };
             let mut job = pool.remove(pos);
             let need = job.req.prompt_tokens - job.prefilled;
             let take = chunk_for(policy, &cfg, need).min(budget);
@@ -134,6 +148,9 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             budget -= take;
             prefill_tokens += take;
             job.prefilled += take;
+            if job.first_admit_at.is_none() {
+                job.first_admit_at = Some(time);
+            }
             admitted.push(job);
         }
 
@@ -150,6 +167,7 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         // G. 本步开始时已在 decode 的序列出词
         for &i in &decode_set {
             let seq = &mut running[i];
+            seq.max_gap_us = seq.max_gap_us.max(time - seq.last_token_at);
             seq.generated += 1;
             seq.last_token_at = time;
         }
@@ -178,9 +196,12 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             }
         }
 
-        // J. 剩下的回等待队列（被抢占者本步不参与准入）
-        pool.extend(cooled);
-        pool.sort_by_key(|s| (s.req.arrival_us, s.req.id));
+        // J. 剩下的回等待队列（被抢占者本步不参与准入；按到达时间回插，不整体排序）
+        for v in cooled {
+            let at = pool
+                .partition_point(|s| (s.req.arrival_us, s.req.id) < (v.req.arrival_us, v.req.id));
+            pool.insert(at, v);
+        }
         waiting.splice(0..0, pool);
     }
 
@@ -188,6 +209,34 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
     report.finished.sort_by_key(|f| f.id);
     report.rejected.sort_by_key(|r| r.id);
     Ok(report)
+}
+
+/// 先在候选里做老化插队（等待超过 factor×自身首字 SLO 的最老者优先），否则走策略本身。
+fn pick(policy: Policy, pool: &[Seq], now: u64, cfg: &Config) -> Option<usize> {
+    if let Some(factor) = cfg.aging_factor {
+        let mut aged: Option<(u64, usize)> = None;
+        for (i, s) in pool.iter().enumerate() {
+            let waited = now.saturating_sub(s.req.arrival_us);
+            if waited > factor.saturating_mul(s.req.ttft_slo_us) {
+                match aged {
+                    Some((w, _)) if w >= waited => {}
+                    _ => aged = Some((waited, i)),
+                }
+            }
+        }
+        if let Some((_, i)) = aged {
+            return Some(i);
+        }
+    }
+    // 与 Policy::pick 同语义，但不在热路径上分配 Vec（等待队列可能上千条）
+    match policy {
+        Policy::Fifo => (!pool.is_empty()).then_some(0),
+        Policy::Deadline => pool
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, s)| (s.req.ttft_deadline(), s.req.arrival_us, s.req.id))
+            .map(|(i, _)| i),
+    }
 }
 
 fn hopeless(seq: &Seq, now: u64, cfg: &Config) -> bool {
@@ -239,7 +288,12 @@ fn convert(seq: &Seq) -> Finished {
         ttft_us,
         finish_us: seq.last_token_at,
         tpot_us,
+        max_gap_us: seq.max_gap_us,
+        wait_us: seq
+            .first_admit_at
+            .unwrap_or(seq.req.arrival_us)
+            .saturating_sub(seq.req.arrival_us),
         met_ttft: ttft_us <= seq.req.ttft_slo_us,
-        met_tpot: tpot_us <= seq.req.tpot_slo_us,
+        met_tpot: tpot_us <= seq.req.tpot_slo_us && seq.max_gap_us <= 2 * seq.req.tpot_slo_us,
     }
 }

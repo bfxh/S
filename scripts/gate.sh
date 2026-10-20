@@ -101,8 +101,28 @@ pc=$(echo "$pre" | grep -o '"preemptions":[0-9]*' | cut -d: -f2)
 [ "${pm:-1}" -eq 0 ] || red "抢占后交互式仍违约: $pm"
 [ "${pc:-0}" -gt 0 ] || red "没有发生抢占"
 
+step "5. M1 扫描：oracle 必须不低于最好固定策略，且 5 条轨迹都要跑出来"
+cargo build -q -p lacbs-sim || red "sim 构建失败"
+if ./target/debug/sim.exe --sweep > "$tmp/sweep.out" 2>&1; then
+  n=$(grep -c '^SUMMARY' "$tmp/sweep.out")
+  [ "$n" -eq 5 ] || red "SUMMARY 条数 $n != 5"
+  if ! awk '/^SUMMARY/ {
+        b=-1; o=-1;
+        for (i=1;i<=NF;i++) {
+          if ($i ~ /^best_fixed_met=/) { split($i,a,"="); b=a[2]+0 }
+          if ($i ~ /^oracle_met=/) { split($i,a,"="); o=a[2]+0 }
+        }
+        if (b < 0 || o < 0 || o < b) { print "BAD: " $0; bad=1 }
+      } END { exit bad }' "$tmp/sweep.out"; then
+    red "oracle 自检失败（oracle 低于最好固定策略，或解析失败）"
+  fi
+  grep -q 'error=' "$tmp/sweep.out" && red "有 profile 在扫描中报错"
+else
+  red "sweep 运行失败"
+fi
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
-  step "5. hotpath：报告里必须出现被插桩的函数"
+  step "6. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
     || red "hotpath 报告缺 harness::burn"
