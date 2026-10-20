@@ -22,6 +22,7 @@ enum Mode {
 #[derive(Clone, Copy)]
 enum Sig {
     Admit,
+    Resume,
     Step,
 }
 
@@ -39,6 +40,9 @@ struct Args {
     mode: Mode,
     interactive_pct: u32,
     preempt: bool,
+    swap: bool,
+    swap_slots: usize,
+    swap_us: u64,
 }
 
 impl Args {
@@ -52,6 +56,9 @@ impl Args {
             mode: Mode::Edf,
             interactive_pct: 30,
             preempt: true,
+            swap: false,
+            swap_slots: 4,
+            swap_us: 2_000,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -64,6 +71,9 @@ impl Args {
                 "--step-ms" => a.step_ms = val()?.parse()?,
                 "--interactive-pct" => a.interactive_pct = val()?.parse()?,
                 "--no-preempt" => a.preempt = false,
+                "--swap" => a.swap = true,
+                "--swap-slots" => a.swap_slots = val()?.parse()?,
+                "--swap-us" => a.swap_us = val()?.parse()?,
                 "--mode" => {
                     a.mode = match val()?.as_str() {
                         "fifo" => Mode::Fifo,
@@ -96,6 +106,10 @@ struct Pending {
     output: u32,
     state: Arc<JobState>,
     ready_at: Instant,
+    /// 换出后恢复：跳过 prefill，从已产出的 token 继续
+    resume: bool,
+    /// 是否占着一个换出槽位（准入或拒绝时归还）
+    swapped: bool,
 }
 
 struct Running {
@@ -139,7 +153,7 @@ fn main() -> anyhow::Result<()> {
 
     let summary = obs.rt.block_on(run(&args))?;
     println!(
-        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"stalls\":{},\"elapsed_ms\":{}}}",
+        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"swaps\":{},\"stalls\":{},\"elapsed_ms\":{}}}",
         summary.tasks,
         summary.completed,
         summary.rejected,
@@ -150,6 +164,7 @@ fn main() -> anyhow::Result<()> {
         summary.max_running,
         summary.preemptions,
         summary.recompute_tokens,
+        summary.swaps,
         watch.stall_count(),
         summary.elapsed_ms
     );
@@ -167,6 +182,7 @@ struct Summary {
     max_running: usize,
     preemptions: u64,
     recompute_tokens: u64,
+    swaps: u64,
     elapsed_ms: u128,
 }
 
@@ -215,6 +231,8 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     let mut ticks = 0u64;
     let mut max_running = 0usize;
     let (mut preemptions, mut recompute_tokens) = (0u64, 0u64);
+    let mut swap_used = 0usize;
+    let mut swaps = 0u64;
 
     loop {
         if arrivals_open {
@@ -232,6 +250,8 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
                         slo_us: a.slo_us,
                     }),
                     ready_at: Instant::now(),
+                    resume: false,
+                    swapped: false,
                 });
             }
             if arr_rx.is_closed() {
@@ -245,6 +265,9 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
         while i < waiting.len() {
             let w = &waiting[i];
             if w.state.first_ms.load(Ordering::Relaxed) == 0 && now >= w.deadline {
+                if w.swapped {
+                    swap_used = swap_used.saturating_sub(1);
+                }
                 waiting.remove(i);
                 rejected += 1;
             } else {
@@ -264,6 +287,9 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
                     continue;
                 }
                 let job = waiting.remove(i);
+                if job.swapped {
+                    swap_used = swap_used.saturating_sub(1);
+                }
                 spawn_job(job, &done_tx, &mut running);
                 continue;
             }
@@ -283,9 +309,20 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             let r = running.remove(v);
             r.handle.abort();
             let produced = r.state.produced.load(Ordering::Relaxed);
-            recompute_tokens += u64::from(r.prompt) + u64::from(produced);
             preemptions += 1;
-            r.state.produced.store(0, Ordering::Relaxed);
+            let can_swap = args.swap && swap_used < args.swap_slots;
+            if can_swap {
+                swap_used += 1;
+                swaps += 1;
+            } else {
+                recompute_tokens += u64::from(r.prompt) + u64::from(produced);
+                r.state.produced.store(0, Ordering::Relaxed);
+            }
+            let delay = if can_swap {
+                Duration::from_micros(args.swap_us)
+            } else {
+                tick
+            };
             waiting.push(Pending {
                 id: r.id,
                 class: r.class,
@@ -294,7 +331,9 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
                 prompt: r.prompt,
                 output: r.output,
                 state: r.state,
-                ready_at: Instant::now() + tick,
+                ready_at: Instant::now() + delay,
+                resume: can_swap,
+                swapped: can_swap,
             });
         }
 
@@ -349,13 +388,15 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
         max_running,
         preemptions,
         recompute_tokens,
+        swaps,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
 
 fn spawn_job(job: Pending, done: &mpsc::UnboundedSender<Record>, running: &mut Vec<Running>) {
     let (tx, rx) = mpsc::channel::<Sig>(4);
-    let _ = tx.try_send(Sig::Admit); // 先发准入，job 任务才开始 prefill
+    let first = if job.resume { Sig::Resume } else { Sig::Admit };
+    let _ = tx.try_send(first);
     let state = job.state.clone();
     let arrival = job.arrival;
     let output = job.output;
@@ -365,6 +406,7 @@ fn spawn_job(job: Pending, done: &mpsc::UnboundedSender<Record>, running: &mut V
         let mut rx = rx;
         match rx.recv().await {
             Some(Sig::Admit) => spin(Duration::from_micros(u64::from(prompt))),
+            Some(Sig::Resume) => {}
             _ => return,
         }
         while state.produced.load(Ordering::Relaxed) < output {
