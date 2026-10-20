@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/lacbs-obs", "crates/lacbs-harness", "crates/lacbs-console-probe"]
+members = [
+    "crates/lacbs-core",
+    "crates/lacbs-sim",
+    "crates/lacbs-obs",
+    "crates/lacbs-harness",
+    "crates/lacbs-console-probe",
+]
 
 [workspace.package]
 version = "0.1.0"

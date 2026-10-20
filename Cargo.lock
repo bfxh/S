@@ -869,6 +869,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lacbs-core"
+version = "0.1.0"
+
+[[package]]
 name = "lacbs-harness"
 version = "0.1.0"
 dependencies = [
@@ -890,6 +894,14 @@ dependencies = [
  "hotpath",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lacbs-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lacbs-core",
 ]
 
 [[package]]

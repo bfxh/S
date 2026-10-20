@@ -66,8 +66,23 @@ workers=$(grep -o '"worker_cardinality": [0-9]*' traces/shape.json | grep -o '[0
 [ -n "$workers" ] && [ "$workers" -eq 4 ] || red "worker 数不对: ${workers:-无}"
 echo "PollStartEvent=$polls worker_cardinality=$workers"
 
+step "4. 调度器内核：异质 SLO 下截止期策略必须减少交互式违约"
+cargo test -q -p lacbs-core > "$tmp/core-test.out" 2>&1 || red "内核测试失败，见 $tmp/core-test.out"
+cargo build -q -p lacbs-sim || red "sim 构建失败"
+fifo=$(./target/debug/sim.exe --policy fifo)
+edf=$(./target/debug/sim.exe --policy deadline)
+echo "$fifo"
+echo "$edf"
+f=$(echo "$fifo" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
+e=$(echo "$edf" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
+if [ -z "$f" ] || [ -z "$e" ]; then
+  red "解析不到交互式违约数"
+elif [ "$e" -ge "$f" ]; then
+  red "截止期策略没赢: fifo=$f deadline=$e"
+fi
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
-  step "4. hotpath：报告里必须出现被插桩的函数"
+  step "5. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
     || red "hotpath 报告缺 harness::burn"
