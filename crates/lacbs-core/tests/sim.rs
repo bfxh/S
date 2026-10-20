@@ -20,6 +20,7 @@ fn cfg() -> Config {
         max_attempts: 1,
         retry_seed: 1,
         max_queue: None,
+        reject_only_when_contended: false,
     }
 }
 
@@ -254,4 +255,37 @@ fn controller_run_accounts_everything_and_bounds_switches() {
         ctl.switches,
         windows.len()
     );
+}
+
+#[test]
+fn contended_reject_only_rejects_when_capacity_is_needed() {
+    // 4 条注定无望的请求，slots=2，且没有"还能达标"的竞争者
+    let mk = |id: u32| lacbs_core::Request {
+        id,
+        attempt: 0,
+        class: Class::Batch,
+        arrival_us: 0,
+        prompt_tokens: 64,
+        output_tokens: 2,
+        ttft_slo_us: 1, // 无论如何都赶不上
+        tpot_slo_us: 10_000_000,
+    };
+    let reqs: Vec<_> = (0..4).map(mk).collect();
+
+    let mut base = cfg();
+    base.max_seqs = 2;
+    base.reject_hopeless = true;
+
+    let strict = run(base, Policy::Deadline, reqs.clone()).unwrap();
+    assert_eq!(strict.rejected.len(), 4, "无竞争门槛时，无望请求应被拒");
+
+    let mut lenient_cfg = base;
+    lenient_cfg.reject_only_when_contended = true;
+    let lenient = run(lenient_cfg, Policy::Deadline, reqs.clone()).unwrap();
+    assert_eq!(
+        lenient.rejected.len(),
+        0,
+        "没有竞争者时不该拒绝，宁可晚服务"
+    );
+    assert_eq!(lenient.finished.len(), 4);
 }

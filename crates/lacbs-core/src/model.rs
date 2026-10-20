@@ -66,6 +66,9 @@ pub struct Config {
     pub retry_seed: u64,
     /// 等待队列上限；超出的新到请求直接拒绝。None = 不限。
     pub max_queue: Option<usize>,
+    /// 只在"还能达标的等待者已经超过空余槽位"时才拒绝无望请求；
+    /// 关掉时只要无望就拒。开着的语义是"宁可晚服务，也不白占一个拒绝"。
+    pub reject_only_when_contended: bool,
 }
 
 impl Config {

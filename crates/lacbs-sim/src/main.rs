@@ -24,6 +24,7 @@ fn main() -> anyhow::Result<()> {
         max_attempts: 1,
         retry_seed: 1,
         max_queue: None,
+        reject_only_when_contended: false,
     };
 
     let mut sweep = false;
@@ -85,6 +86,7 @@ fn main() -> anyhow::Result<()> {
             "--sweep" => sweep = true,
             "--replay-csv" => replay_csv = Some(val()?),
             "--adaptive" => adaptive = true,
+            "--contended-reject" => cfg.reject_only_when_contended = true,
             "--window-s" => window_s = val()?.parse()?,
             "--phases" => phases = val()?.parse()?,
             "--target-load" => target_load = val()?.parse()?,

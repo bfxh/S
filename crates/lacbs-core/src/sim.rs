@@ -218,14 +218,24 @@ fn run_inner(
             }
         }
 
-        // A. 拒绝：装不下的（prompt+output 超过 KV 上限）永远拒绝；无望的按开关拒绝
+        // A. 拒绝：装不下的永远拒绝；无望的按开关拒绝。
+        // `reject_only_when_contended`：只有当"还能达标的等待者"多于空余槽位时才拒，
+        // 否则让无望请求晚服务（记 0 分好过拒绝的 −1 分）。
+        let contended = if cfg.reject_only_when_contended {
+            let viable = pool.iter().filter(|s| !hopeless(s, time, &cfg)).count();
+            viable > cfg.max_seqs.saturating_sub(running.len())
+        } else {
+            true
+        };
         {
             let mut i = 0;
             while i < pool.len() {
                 let infeasible = cfg
                     .kv_capacity_tokens
                     .is_some_and(|cap| pool[i].req.prompt_tokens + pool[i].req.output_tokens > cap);
-                if infeasible || (cfg.reject_hopeless && hopeless(&pool[i], time, &cfg)) {
+                if infeasible
+                    || (cfg.reject_hopeless && contended && hopeless(&pool[i], time, &cfg))
+                {
                     let s = pool.remove(i);
                     report.rejected.push(Rejected {
                         id: s.req.id,
