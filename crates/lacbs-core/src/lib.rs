@@ -1,3 +1,4 @@
+pub mod controller;
 pub mod metrics;
 pub mod model;
 pub mod policy;

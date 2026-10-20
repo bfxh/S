@@ -5,6 +5,7 @@
 //! - `reject_hopeless`：到服务时已赶不上首字截止期的请求直接拒绝；
 //! - `preempt_for_interactive`：交互式在等且槽位满时，挤掉批处理序列，KV 丢弃、恢复时重算。
 
+use crate::controller::{Controller, WindowStats};
 use crate::model::{Class, Config, Finished, Rejected, Report, Request};
 use crate::policy::Policy;
 use crate::rng::Lcg;
@@ -42,7 +43,103 @@ impl Seq {
     }
 }
 
-pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Report, String> {
+pub fn run(cfg: Config, policy: Policy, requests: Vec<Request>) -> Result<Report, String> {
+    run_inner(cfg, Some(policy), requests, None)
+}
+
+/// 带窗口控制器的运行：每个窗口结束时问控制器要一个 profile，立刻生效。
+pub fn run_with_controller(
+    base: Config,
+    requests: Vec<Request>,
+    window_us: u64,
+    ctl: &mut dyn Controller,
+) -> Result<(Report, Vec<WindowStats>), String> {
+    let arrivals: Vec<u64> = {
+        let mut v: Vec<u64> = requests.iter().map(|r| r.arrival_us).collect();
+        v.sort_unstable();
+        v
+    };
+    let mut windows = Vec::new();
+    let mut ctx = CtlCtx {
+        window_us: window_us.max(1),
+        index: 0,
+        next_window: 0,
+        win_start: 0,
+        fin_cursor: 0,
+        rej_cursor: 0,
+        recompute_seen: 0,
+        arrivals,
+        arr_cursor: 0,
+        ctl,
+        windows: &mut windows,
+    };
+    let report = run_inner(base, None, requests, Some(&mut ctx))?;
+    Ok((report, windows))
+}
+
+struct CtlCtx<'a> {
+    window_us: u64,
+    index: u64,
+    next_window: u64,
+    win_start: u64,
+    fin_cursor: usize,
+    rej_cursor: usize,
+    recompute_seen: u64,
+    arrivals: Vec<u64>,
+    arr_cursor: usize,
+    ctl: &'a mut dyn Controller,
+    windows: &'a mut Vec<WindowStats>,
+}
+
+fn close_window(
+    c: &mut CtlCtx<'_>,
+    report: &Report,
+    end: u64,
+    queue_age_us: u64,
+    queue_len: usize,
+) -> WindowStats {
+    let start = c.win_start;
+    let from = c.arr_cursor;
+    while c.arr_cursor < c.arrivals.len() && c.arrivals[c.arr_cursor] < end {
+        c.arr_cursor += 1;
+    }
+    let arrivals = c.arr_cursor - from;
+    let fin = &report.finished[c.fin_cursor..];
+    let rej = &report.rejected[c.rej_cursor..];
+    let mut met = 0usize;
+    let mut max_wait = queue_age_us;
+    for f in fin {
+        if f.met_both() {
+            met += 1;
+        }
+        max_wait = max_wait.max(f.wait_us);
+    }
+    let stats = WindowStats {
+        index: c.index,
+        t_start: start,
+        t_end: end,
+        arrivals,
+        finished: fin.len(),
+        met,
+        rejected: rej.len(),
+        recompute_delta: report.recomputed_tokens - c.recompute_seen,
+        max_wait_us: max_wait,
+        queue_len,
+    };
+    c.fin_cursor = report.finished.len();
+    c.rej_cursor = report.rejected.len();
+    c.recompute_seen = report.recomputed_tokens;
+    stats
+}
+
+fn run_inner(
+    base: Config,
+    policy: Option<Policy>,
+    mut requests: Vec<Request>,
+    mut ctl: Option<&mut CtlCtx<'_>>,
+) -> Result<Report, String> {
+    let mut cfg = base;
+    let mut policy = policy.unwrap_or(Policy::Deadline);
     cfg.validate()?;
     for r in &requests {
         if r.prompt_tokens == 0 || r.output_tokens == 0 {
@@ -55,6 +152,10 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
     let mut running: Vec<Seq> = Vec::new();
     let mut report = Report::default();
     let mut time = waiting.first().map_or(0, |s| s.req.arrival_us);
+    if let Some(c) = ctl.as_mut() {
+        c.win_start = time;
+        c.next_window = time + c.window_us;
+    }
     let mut rng = Lcg::new(cfg.retry_seed);
     let mut next_id = waiting.iter().map(|s| s.req.id).max().unwrap_or(0) + 1;
 
@@ -68,6 +169,29 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         }
         if running.is_empty() && waiting.is_empty() {
             break;
+        }
+
+        if let Some(c) = ctl.as_mut() {
+            while time >= c.next_window {
+                let age = waiting
+                    .first()
+                    .map_or(0, |s| time.saturating_sub(s.req.arrival_us));
+                let stats = close_window(
+                    c,
+                    &report,
+                    c.next_window,
+                    age,
+                    waiting.len() + running.len(),
+                );
+                let pid = c.ctl.choose(&stats);
+                let (p, next) = pid.apply(base);
+                policy = p;
+                cfg = next;
+                c.windows.push(stats);
+                c.win_start = c.next_window;
+                c.next_window += c.window_us;
+                c.index += 1;
+            }
         }
 
         let available_end = waiting.partition_point(|s| s.req.arrival_us <= time);
@@ -289,6 +413,13 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             pool.insert(at, v);
         }
         waiting.splice(0..0, pool);
+    }
+
+    if let Some(c) = ctl.as_mut()
+        && time > c.win_start
+    {
+        let stats = close_window(c, &report, time, 0, waiting.len() + running.len());
+        c.windows.push(stats);
     }
 
     report.makespan_us = time;

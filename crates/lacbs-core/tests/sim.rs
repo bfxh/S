@@ -232,3 +232,26 @@ fn retry_cap_is_respected_and_accounted() {
         "max_attempts=2 时每次拒绝最多再生一次尝试"
     );
 }
+
+#[test]
+fn controller_run_accounts_everything_and_bounds_switches() {
+    use lacbs_core::controller::RuleController;
+    use lacbs_core::profile::ProfileId;
+    use lacbs_core::sim::run_with_controller;
+
+    let reqs = workload();
+    let mut ctl = RuleController::new(ProfileId::P1);
+    let (r, windows) = run_with_controller(cfg(), reqs.clone(), 50_000, &mut ctl).unwrap();
+    assert_eq!(
+        r.finished.len() + r.rejected.len(),
+        reqs.len(),
+        "控制器运行也必须把每个请求都交代清楚"
+    );
+    assert!(!windows.is_empty(), "至少要产生一个窗口");
+    assert!(
+        ctl.switches <= windows.len() as u64,
+        "切换次数 {} 超过窗口数 {}",
+        ctl.switches,
+        windows.len()
+    );
+}

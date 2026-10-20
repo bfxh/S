@@ -141,8 +141,19 @@ else
   red "真实 trace 回放失败"
 fi
 
+step "7. M2 控制器（fixture）：必须跑完且切换次数 ≤ 窗口数"
+if ./target/debug/sim.exe --replay-csv tests/fixtures/burstgpt_sample.csv --adaptive --window-s 2     --decode-us 2000 --max-queue 512 --target-load 0.8 --phases 3 --reject-penalty 1 > "$tmp/adaptive.out" 2>&1; then
+  grep -q '^ADAPTIVE' "$tmp/adaptive.out" || red "没有 ADAPTIVE 输出"
+  sw=$(grep -o 'switches=[0-9]*' "$tmp/adaptive.out" | cut -d: -f2 | cut -d= -f2)
+  win=$(grep -o 'windows=[0-9]*' "$tmp/adaptive.out" | cut -d: -f2 | cut -d= -f2)
+  [ -n "$sw" ] && [ -n "$win" ] || red "解析不到 switches/windows"
+  [ "${sw:-1}" -le "${win:-0}" ] || red "切换次数 $sw 超过窗口数 $win"
+else
+  red "控制器运行失败"
+fi
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
-  step "7. hotpath：报告里必须出现被插桩的函数"
+  step "8. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
     || red "hotpath 报告缺 harness::burn"

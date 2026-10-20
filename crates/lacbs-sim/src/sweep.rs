@@ -1,6 +1,7 @@
 //! 扫描：固定 profile 跑完整轨迹，按"到达阶段"归属，逐阶段取最优得到 oracle。
 //! 支持两类输入：合成阶段化轨迹，以及从真实 trace 抽出的 CSV（`replay_csv`）。
 
+use lacbs_core::controller::RuleController;
 use lacbs_core::model::{Class, Config, Request};
 use lacbs_core::profile::ProfileId;
 use lacbs_core::sim;
@@ -46,6 +47,69 @@ pub fn replay_csv(
     phases: usize,
     target_load: f64,
 ) -> anyhow::Result<()> {
+    let l = load_scaled(path, cfg, target_load, phases)?;
+    one_requests(&l.label, &l.names, &l.starts, l.reqs, cfg, reject_penalty)
+}
+
+/// 同一个 CSV，跑窗口级规则控制器（M2）。
+pub fn replay_adaptive(
+    path: &str,
+    cfg: Config,
+    reject_penalty: f64,
+    phases: usize,
+    target_load: f64,
+    window_s: u64,
+) -> anyhow::Result<()> {
+    let l = load_scaled(path, cfg, target_load, phases)?;
+    let mut ctl = RuleController::new(ProfileId::P4);
+    let (report, windows) =
+        sim::run_with_controller(cfg, l.reqs.clone(), window_s.max(1) * 1_000_000, &mut ctl)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+    let mut met_by_phase = vec![0usize; l.starts.len()];
+    for f in &report.finished {
+        if f.met_both() {
+            met_by_phase[phase_of(f.arrival_us, &l.starts)] += 1;
+        }
+    }
+    let mut rej_by_phase = vec![0i64; l.starts.len()];
+    for x in &report.rejected {
+        rej_by_phase[phase_of(x.arrival_us, &l.starts)] += 1;
+    }
+    let score: f64 = met_by_phase
+        .iter()
+        .zip(&rej_by_phase)
+        .map(|(m, r)| *m as f64 - reject_penalty * *r as f64)
+        .sum();
+
+    println!(
+        "ADAPTIVE trace={} score={:.0} met={} finished={} rejected={} steps={} switches={} windows={} max_wait_ms={:.1} by_phase={}",
+        l.label,
+        score,
+        report.met_both(),
+        report.finished.len(),
+        report.rejected.len(),
+        report.steps,
+        ctl.switches,
+        windows.len(),
+        report.max_wait_us() as f64 / 1000.0,
+        met_by_phase
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    Ok(())
+}
+
+struct Loaded {
+    label: String,
+    reqs: Vec<Request>,
+    starts: Vec<u64>,
+    names: Vec<String>,
+}
+
+fn load_scaled(path: &str, cfg: Config, target_load: f64, phases: usize) -> anyhow::Result<Loaded> {
     let text = std::fs::read_to_string(path)?;
     let mut rows: Vec<(f64, u32, u32, Class)> = Vec::new();
     let mut skipped = 0usize;
@@ -86,8 +150,7 @@ pub fn replay_csv(
     }
     let k = observed / (target_load * cap);
     eprintln!(
-        "replay {path}: rows={n} span={span_s:.0}s rate={observed:.2}/s cap={cap:.2}/s \
-         avg_prompt={avg_prompt:.0} avg_out={avg_out:.0} scale={k:.4} (sim_span={:.0}s)",
+        "replay {path}: rows={n} span={span_s:.0}s rate={observed:.2}/s cap={cap:.2}/s          avg_prompt={avg_prompt:.0} avg_out={avg_out:.0} scale={k:.4} (sim_span={:.0}s)",
         span_s * k
     );
 
@@ -120,9 +183,15 @@ pub fn replay_csv(
     let label = std::path::Path::new(path)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("csv");
+        .unwrap_or("csv")
+        .to_string();
 
-    one_requests(label, &names, &starts, reqs, cfg, reject_penalty)
+    Ok(Loaded {
+        label,
+        reqs,
+        starts,
+        names,
+    })
 }
 
 /// 稳态容量：受槽位与 KV 上限双重约束；decode 步成本按有效并发算。

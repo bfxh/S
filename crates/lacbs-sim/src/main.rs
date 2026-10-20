@@ -32,6 +32,8 @@ fn main() -> anyhow::Result<()> {
     let mut phases = 4usize;
     let mut target_load = 1.1f64;
     let mut decode_set = false;
+    let mut adaptive = false;
+    let mut window_s = 60u64;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().context(format!("{flag} 缺值"));
@@ -82,6 +84,8 @@ fn main() -> anyhow::Result<()> {
             "--prefill-us" => cfg.prefill_us_per_token = val()?.parse()?,
             "--sweep" => sweep = true,
             "--replay-csv" => replay_csv = Some(val()?),
+            "--adaptive" => adaptive = true,
+            "--window-s" => window_s = val()?.parse()?,
             "--phases" => phases = val()?.parse()?,
             "--target-load" => target_load = val()?.parse()?,
             "--max-queue" => cfg.max_queue = Some(val()?.parse()?),
@@ -99,6 +103,16 @@ fn main() -> anyhow::Result<()> {
     if let Some(path) = replay_csv {
         if !decode_set {
             cfg.decode_us_per_seq = 500;
+        }
+        if adaptive {
+            return sweep::replay_adaptive(
+                &path,
+                cfg,
+                reject_penalty,
+                phases,
+                target_load,
+                window_s,
+            );
         }
         return sweep::replay_csv(&path, cfg, reject_penalty, phases, target_load);
     }

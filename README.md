@@ -1,16 +1,18 @@
 # lacbs — 延迟感知的连续批处理调度器
 
-Rust 实现。**方向：非平稳负载下的自适应调度。** 合成负载与 BurstGPT 窗口上静态 profile 已接近 oracle；
-但预注册的 ServeGen 批次（6 条、固定 seed）有 **4 条 gap ≥5%**，达到启动线 ⇒
-**M2（规则表控制器 + 安全层）已授权**，尚未实现。内核、profile 评估母线、真实/生成 trace 回放与观测工具已就绪。
-详见 [docs/M1-ORACLE.md](docs/M1-ORACLE.md)、[docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md)。
+Rust 实现。**结论：非平稳负载下存在逐阶段 oracle gap（预注册批次 4/6 ≥5%），但窗口级规则控制器抓不住它**
+——M2 实测在 6 条轨迹上 5 条劣于静态 P4（最差 −16%）、1 条打平，故不上线；默认档为 P4。
+仓内保留内核、profile 评估母线、真实/生成 trace 回放、观测工具与 M2 复现路径。
+详见 [docs/M1-ORACLE.md](docs/M1-ORACLE.md)、[docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md)、
+[docs/M2-RESULT.md](docs/M2-RESULT.md)。
 
 | 文档 | 内容 |
 |---|---|
 | [docs/RESEARCH-ADAPTIVE.md](docs/RESEARCH-ADAPTIVE.md) | 文献与项目分析：vLLM/Sarathi/Llumnix/DistServe/H-MAS，证据分级与空白 |
 | [docs/ADAPTIVE-DESIGN.md](docs/ADAPTIVE-DESIGN.md) | 自适应设计：信号、profile 空间、控制器、安全不变量、评估与 kill criteria |
 | [docs/M1-ORACLE.md](docs/M1-ORACLE.md) | M1/M1.1 实测与结案依据：纯达标口径 gap 0%，可用性口径聚合 ~1% |
-| [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放：BurstGPT 4 窗口 ≤0.1%，ServeGen 2/3 ≥5%，合计 2/6 |
+| [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放与预注册批次（4/6 ≥5%） |
+| [docs/M2-RESULT.md](docs/M2-RESULT.md) | M2 规则控制器实测：5/6 劣于静态档，判定不上线 |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
 | [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 
