@@ -99,7 +99,7 @@
 - **自适应控制器方向正式结案**：不写规则表控制器（M2）、不写 bandit（M3）。
   保留 profile + sweep 作为评估母线；部署时按口径选一个静态档（追求可用性选 P4，追求纯吞吐选 P2）。
 - **这个结论的边界**：它是"当前模型 + 当前目标"的结论。会让它翻案的条件写在设计文档 §11.1。
-  真实 trace 已做过一轮：BurstGPT 三个健康窗口的 gap 均 ≤0.1%，**重启条件未满足**（`docs/REPLAY-BURSTGPT.md`）；
+  真实 trace 已做过一轮：BurstGPT 三个健康窗口的 gap 均 ≤0.1%，**重启条件未满足**（`docs/REPLAY-TRACES.md`）；
   ServeGen 与"长 prompt + 强突发"的重窗口尚未覆盖。
 
 ## 复现

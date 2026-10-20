@@ -1,16 +1,16 @@
 # lacbs — 延迟感知的连续批处理调度器
 
-Rust 实现。**结论：非平稳负载下，单一静态 profile 已接近逐阶段 oracle（合成聚合 ~1%，
-BurstGPT 真实窗口 ≤0.1%），自适应控制器方向结案**；仓内保留调度器内核、profile 评估母线、
-真实 trace 回放与观测工具。详见 [docs/M1-ORACLE.md](docs/M1-ORACLE.md)、
-[docs/REPLAY-BURSTGPT.md](docs/REPLAY-BURSTGPT.md)。
+Rust 实现。**结论：非平稳负载下，单一静态 profile 在合成负载与 BurstGPT 真实窗口上都接近逐阶段 oracle
+（聚合 ~1% / ≤0.1%）；ServeGen 生成负载 3 条里 2 条 ≥5%（合计 2/6，未达重启门槛），
+自适应控制器方向维持结案**。仓内保留调度器内核、profile 评估母线、真实/生成 trace 回放与观测工具。
+详见 [docs/M1-ORACLE.md](docs/M1-ORACLE.md)、[docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md)。
 
 | 文档 | 内容 |
 |---|---|
 | [docs/RESEARCH-ADAPTIVE.md](docs/RESEARCH-ADAPTIVE.md) | 文献与项目分析：vLLM/Sarathi/Llumnix/DistServe/H-MAS，证据分级与空白 |
 | [docs/ADAPTIVE-DESIGN.md](docs/ADAPTIVE-DESIGN.md) | 自适应设计：信号、profile 空间、控制器、安全不变量、评估与 kill criteria |
 | [docs/M1-ORACLE.md](docs/M1-ORACLE.md) | M1/M1.1 实测与结案依据：纯达标口径 gap 0%，可用性口径聚合 ~1% |
-| [docs/REPLAY-BURSTGPT.md](docs/REPLAY-BURSTGPT.md) | 真实 trace 回放：3 个健康窗口 gap ≤0.1%，重启条件未满足 |
+| [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放：BurstGPT 4 窗口 ≤0.1%，ServeGen 2/3 ≥5%，合计 2/6 |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
 | [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 
