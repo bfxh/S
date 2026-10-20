@@ -23,10 +23,15 @@ fn main() -> anyhow::Result<()> {
         retry_delay_us: 0,
         max_attempts: 1,
         retry_seed: 1,
+        max_queue: None,
     };
 
     let mut sweep = false;
     let mut reject_penalty = 0.0f64;
+    let mut replay_csv: Option<String> = None;
+    let mut phases = 4usize;
+    let mut target_load = 1.1f64;
+    let mut decode_set = false;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().context(format!("{flag} 缺值"));
@@ -70,9 +75,16 @@ fn main() -> anyhow::Result<()> {
             "--max-seqs" => cfg.max_seqs = val()?.parse()?,
             "--max-step-tokens" => cfg.max_step_tokens = val()?.parse()?,
             "--chunk" => cfg.chunk_tokens = val()?.parse()?,
-            "--decode-us" => cfg.decode_us_per_seq = val()?.parse()?,
+            "--decode-us" => {
+                cfg.decode_us_per_seq = val()?.parse()?;
+                decode_set = true;
+            }
             "--prefill-us" => cfg.prefill_us_per_token = val()?.parse()?,
             "--sweep" => sweep = true,
+            "--replay-csv" => replay_csv = Some(val()?),
+            "--phases" => phases = val()?.parse()?,
+            "--target-load" => target_load = val()?.parse()?,
+            "--max-queue" => cfg.max_queue = Some(val()?.parse()?),
             "--reject-penalty" => reject_penalty = val()?.parse()?,
             "--kv-tokens" => cfg.kv_capacity_tokens = Some(val()?.parse()?),
             "--retry-pct" => cfg.retry_prob_pct = val()?.parse()?,
@@ -84,6 +96,12 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    if let Some(path) = replay_csv {
+        if !decode_set {
+            cfg.decode_us_per_seq = 500;
+        }
+        return sweep::replay_csv(&path, cfg, reject_penalty, phases, target_load);
+    }
     if sweep {
         return sweep::run(spec.seed, cfg, reject_penalty);
     }

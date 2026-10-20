@@ -19,6 +19,7 @@ fn cfg() -> Config {
         retry_delay_us: 0,
         max_attempts: 1,
         retry_seed: 1,
+        max_queue: None,
     }
 }
 

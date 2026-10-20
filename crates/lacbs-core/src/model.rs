@@ -64,6 +64,8 @@ pub struct Config {
     /// 单次尝试计入上限（含首投）；0/1 表示不重试。
     pub max_attempts: u8,
     pub retry_seed: u64,
+    /// 等待队列上限；超出的新到请求直接拒绝。None = 不限。
+    pub max_queue: Option<usize>,
 }
 
 impl Config {
@@ -89,6 +91,9 @@ impl Config {
         }
         if self.kv_capacity_tokens == Some(0) {
             return Err("kv_capacity_tokens 不能为 0".into());
+        }
+        if self.max_queue == Some(0) {
+            return Err("max_queue 不能为 0".into());
         }
         Ok(())
     }
@@ -142,6 +147,12 @@ pub struct Report {
     pub max_resident_tokens: u32,
     /// KV 上限导致 decode 仍被迫超出的步数（软约束的破例次数）。
     pub kv_overshoot_steps: u64,
+    /// 因队列满被拒的请求数。
+    pub queue_full_rejects: u64,
+    /// 累计 decode token 数（用于看平均并发）。
+    pub total_decode_tokens: u64,
+    /// 累计 prefill token 数。
+    pub total_prefill_tokens: u64,
 }
 
 impl Report {

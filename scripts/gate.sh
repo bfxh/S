@@ -121,8 +121,28 @@ else
   red "sweep 运行失败"
 fi
 
+step "6. 真实 trace 回放（fixture）：5 个 profile 都要跑完且 oracle ≥ best"
+if ./target/debug/sim.exe --replay-csv tests/fixtures/burstgpt_sample.csv --max-queue 1024 --target-load 0.6 --phases 3 --reject-penalty 1 > "$tmp/replay.out" 2>&1; then
+  n=$(grep -c '^ROW' "$tmp/replay.out")
+  [ "$n" -eq 5 ] || red "回放 ROW 条数 $n != 5"
+  [ "$(grep -c '^SUMMARY' "$tmp/replay.out")" -eq 1 ] || red "回放 SUMMARY 条数不对"
+  grep -q 'error=' "$tmp/replay.out" && red "回放中有 profile 报错"
+  if ! awk '/^SUMMARY/ {
+        b=-1; o=-1;
+        for (i=1;i<=NF;i++) {
+          if ($i ~ /^best_score=/) { split($i,a,"="); b=a[2]+0 }
+          if ($i ~ /^oracle_score=/) { split($i,a,"="); o=a[2]+0 }
+        }
+        if (b < 0 || o < 0 || o < b) { print "BAD: " $0; bad=1 }
+      } END { exit bad }' "$tmp/replay.out"; then
+    red "回放 oracle 自检失败"
+  fi
+else
+  red "真实 trace 回放失败"
+fi
+
 if [ "${1:-}" != "--skip-hotpath" ]; then
-  step "6. hotpath：报告里必须出现被插桩的函数"
+  step "7. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
     || red "hotpath 报告缺 harness::burn"

@@ -132,6 +132,14 @@ pub fn capacity_per_s(cfg: &Config, phase: &Phase) -> f64 {
     cfg.max_seqs as f64 / (avg_out * step_us / 1e6)
 }
 
+/// 各类别默认 SLO（与合成轨迹一致）。
+pub fn slo_for(class: Class) -> (u64, u64) {
+    match class {
+        Class::Interactive => (I_TTFT, I_TPOT),
+        Class::Batch => (B_TTFT, B_TPOT),
+    }
+}
+
 fn mid(r: (u32, u32)) -> f64 {
     (r.0 as f64 + r.1 as f64) / 2.0
 }

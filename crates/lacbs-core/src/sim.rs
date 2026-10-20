@@ -9,7 +9,7 @@ use crate::model::{Class, Config, Finished, Rejected, Report, Request};
 use crate::policy::Policy;
 use crate::rng::Lcg;
 
-const STEP_BUDGET: u64 = 500_000;
+const STEP_BUDGET: u64 = 3_000_000;
 
 struct Seq {
     req: Request,
@@ -19,6 +19,8 @@ struct Seq {
     last_token_at: u64,
     first_admit_at: Option<u64>,
     max_gap_us: u64,
+    /// 被抢占后的冷却截止时间：在冷却期内不再被准入，防"挤出→抢回→再挤出"乒乓。
+    cooldown_until: u64,
 }
 
 impl Seq {
@@ -31,6 +33,7 @@ impl Seq {
             last_token_at: req.arrival_us,
             first_admit_at: None,
             max_gap_us: 0,
+            cooldown_until: 0,
         }
     }
 
@@ -74,6 +77,23 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         }
         let mut pool: Vec<Seq> = waiting.drain(..available_end).collect();
 
+        // A0. 队列上限：超出的新到请求直接拒绝（先到先留）
+        if let Some(cap) = cfg.max_queue {
+            while pool.len() > cap {
+                let s = pool.pop().expect("pool 非空");
+                report.rejected.push(Rejected {
+                    id: s.req.id,
+                    class: s.req.class,
+                    arrival_us: s.req.arrival_us,
+                    rejected_at_us: time,
+                });
+                report.queue_full_rejects += 1;
+                if maybe_retry(&s.req, time, &cfg, &mut rng, &mut next_id, &mut waiting) {
+                    report.retries += 1;
+                }
+            }
+        }
+
         // A. 拒绝：装不下的（prompt+output 超过 KV 上限）永远拒绝；无望的按开关拒绝
         {
             let mut i = 0;
@@ -116,6 +136,7 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
                 report.recomputed_tokens += u64::from(v.req.prompt_tokens) + u64::from(v.generated);
                 v.prefilled = 0;
                 v.last_token_at = time;
+                v.cooldown_until = time + cooldown_span(&cfg);
                 cooled.push(v);
                 need -= 1;
             }
@@ -137,6 +158,7 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
                 report.recomputed_tokens += u64::from(v.req.prompt_tokens) + u64::from(v.generated);
                 v.prefilled = 0;
                 v.last_token_at = time;
+                v.cooldown_until = time + cooldown_span(&cfg);
                 cooled.push(v);
             }
         }
@@ -151,8 +173,12 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         let decode_now = decode_set.len() as u32;
         let mut budget = cfg.max_step_tokens - decode_now;
         let mut prefill_tokens = 0u32;
+        // 准入时为"下一步的 decode 增长"预留 max_seqs 个 token，避免把 KV 填到顶后每步都触发抢占
         let mut kv_left = match cfg.kv_capacity_tokens {
-            Some(cap) => cap.saturating_sub(resident_tokens(&running) + decode_now),
+            Some(cap) => cap
+                .saturating_sub(resident_tokens(&running))
+                .saturating_sub(decode_now)
+                .saturating_sub(cfg.max_seqs as u32),
             None => u32::MAX,
         };
 
@@ -189,6 +215,21 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
             admitted.push(job);
         }
 
+        if std::env::var_os("LACBS_DEBUG_STEP").is_some() && report.steps < 8 {
+            eprintln!(
+                "step={} t={}us run={} pool={} wait={} dec={} pf={} admitted={} rej={}",
+                report.steps,
+                time,
+                running.len(),
+                pool.len(),
+                waiting.len(),
+                decode_now,
+                prefill_tokens,
+                admitted.len(),
+                report.rejected.len()
+            );
+        }
+
         // F. 时间前进
         time += cfg.step_overhead_us
             + u64::from(prefill_tokens) * cfg.prefill_us_per_token
@@ -198,6 +239,8 @@ pub fn run(cfg: Config, policy: Policy, mut requests: Vec<Request>) -> Result<Re
         let step_tokens = prefill_tokens + decode_now;
         report.max_step_tokens_seen = report.max_step_tokens_seen.max(step_tokens);
         report.total_step_tokens += u64::from(step_tokens);
+        report.total_decode_tokens += u64::from(decode_now);
+        report.total_prefill_tokens += u64::from(prefill_tokens);
 
         // G. 本步开始时已在 decode 的序列出词
         for &i in &decode_set {
@@ -258,13 +301,20 @@ fn resident_tokens(running: &[Seq]) -> u32 {
     running.iter().map(|s| s.prefilled + s.generated).sum()
 }
 
-/// KV 压力下优先挤出占地最大的批处理序列。
+/// KV 压力下优先挤出占地最大的批处理序列；没有批处理时退而挤最大的任意序列（防活锁）。
 fn pick_kv_victim(running: &[Seq]) -> Option<usize> {
-    running
+    let batch = running
         .iter()
         .enumerate()
         .filter(|(_, s)| s.req.class == Class::Batch)
-        .max_by_key(|(_, s)| (s.prefilled + s.generated, s.req.id))
+        .max_by_key(|(_, s)| (s.prefilled + s.generated, s.req.id));
+    batch
+        .or_else(|| {
+            running
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| (s.prefilled + s.generated, s.req.id))
+        })
         .map(|(i, _)| i)
 }
 
@@ -300,9 +350,13 @@ fn maybe_retry(
 
 /// 先在候选里做老化插队（等待超过 factor×自身首字 SLO 的最老者优先），否则走策略本身。
 fn pick(policy: Policy, pool: &[Seq], now: u64, cfg: &Config) -> Option<usize> {
+    let ready = |s: &Seq| s.cooldown_until <= now;
     if let Some(factor) = cfg.aging_factor {
         let mut aged: Option<(u64, usize)> = None;
         for (i, s) in pool.iter().enumerate() {
+            if !ready(s) {
+                continue;
+            }
             let waited = now.saturating_sub(s.req.arrival_us);
             if waited > factor.saturating_mul(s.req.ttft_slo_us) {
                 match aged {
@@ -317,13 +371,18 @@ fn pick(policy: Policy, pool: &[Seq], now: u64, cfg: &Config) -> Option<usize> {
     }
     // 与 Policy::pick 同语义，但不在热路径上分配 Vec（等待队列可能上千条）
     match policy {
-        Policy::Fifo => (!pool.is_empty()).then_some(0),
+        Policy::Fifo => pool.iter().position(ready),
         Policy::Deadline => pool
             .iter()
             .enumerate()
+            .filter(|(_, s)| ready(s))
             .min_by_key(|(_, s)| (s.req.ttft_deadline(), s.req.arrival_us, s.req.id))
             .map(|(i, _)| i),
     }
+}
+
+fn cooldown_span(cfg: &Config) -> u64 {
+    cfg.step_overhead_us + cfg.decode_us_per_seq * cfg.max_seqs as u64
 }
 
 fn hopeless(seq: &Seq, now: u64, cfg: &Config) -> bool {
