@@ -1,14 +1,17 @@
-//! 执行层 v0：把内核的策略（EDF 准入 / 无望即拒）真的跑在 tokio 任务上。
-//! 每个 tick 代表一次引擎迭代：给每个在跑请求发一个"出词许可"，任务拿到后做一次计算。
-//! 抢占暂未接入（任务取消语义留给下一版），其余与 kernel 的语义一致。
+//! 执行层 v1：内核策略跑在 tokio 任务上。
+//! - EDF/FIFO 准入、无望即拒；
+//! - 交互式等待且槽位满时，abort 一个剩余最多的批处理任务，进度清零后重新排队（重算）。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
-use lacbs_core::Request;
+use lacbs_core::model::Class;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-const WORK_US: u64 = 200; // 每次 decode 的计算量（模拟）
+const WORK_US: u64 = 200;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -20,16 +23,10 @@ enum Mode {
 enum Sig {
     Admit,
     Step,
-    Reject,
-}
-
-enum Outcome {
-    Completed { ttft: Duration },
-    Rejected,
 }
 
 struct Record {
-    outcome: Outcome,
+    ttft: Duration,
     met: bool,
 }
 
@@ -40,6 +37,8 @@ struct Args {
     max_seqs: usize,
     step_ms: u64,
     mode: Mode,
+    interactive_pct: u32,
+    preempt: bool,
 }
 
 impl Args {
@@ -51,6 +50,8 @@ impl Args {
             max_seqs: 16,
             step_ms: 8,
             mode: Mode::Edf,
+            interactive_pct: 30,
+            preempt: true,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -61,6 +62,8 @@ impl Args {
                 "--secs" => a.secs = val()?.parse()?,
                 "--max-seqs" => a.max_seqs = val()?.parse()?,
                 "--step-ms" => a.step_ms = val()?.parse()?,
+                "--interactive-pct" => a.interactive_pct = val()?.parse()?,
+                "--no-preempt" => a.preempt = false,
                 "--mode" => {
                     a.mode = match val()?.as_str() {
                         "fifo" => Mode::Fifo,
@@ -71,8 +74,50 @@ impl Args {
                 other => bail!("未知参数: {other}"),
             }
         }
+        if a.max_seqs == 0 {
+            bail!("--max-seqs 不能为 0");
+        }
         Ok(a)
     }
+}
+
+struct JobState {
+    produced: AtomicU32,
+    first_ms: AtomicU64,
+    slo_us: u64,
+}
+
+struct Pending {
+    id: u32,
+    class: Class,
+    arrival: Instant,
+    deadline: Instant,
+    prompt: u32,
+    output: u32,
+    state: Arc<JobState>,
+    ready_at: Instant,
+}
+
+struct Running {
+    id: u32,
+    class: Class,
+    arrival: Instant,
+    deadline: Instant,
+    prompt: u32,
+    output: u32,
+    state: Arc<JobState>,
+    tx: mpsc::Sender<Sig>,
+    handle: JoinHandle<()>,
+}
+
+struct Arrival {
+    id: u32,
+    class: Class,
+    at: Instant,
+    deadline: Instant,
+    prompt: u32,
+    output: u32,
+    slo_us: u64,
 }
 
 fn spin(d: Duration) {
@@ -92,21 +137,21 @@ fn main() -> anyhow::Result<()> {
     let obs = lacbs_obs::build_runtime(args.workers)?;
     let watch = lacbs_obs::start_stall_watch(&obs.rt, Duration::from_millis(400));
 
-    let summary = obs.rt.block_on(run(&args));
-    let stalls = watch.stall_count();
-    let s = summary?;
+    let summary = obs.rt.block_on(run(&args))?;
     println!(
-        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"stalls\":{},\"elapsed_ms\":{}}}",
-        s.tasks,
-        s.completed,
-        s.rejected,
-        s.met,
-        s.ttft_p50,
-        s.ttft_p99,
-        s.ticks,
-        s.max_running,
-        stalls,
-        s.elapsed_ms
+        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"stalls\":{},\"elapsed_ms\":{}}}",
+        summary.tasks,
+        summary.completed,
+        summary.rejected,
+        summary.met,
+        summary.ttft_p50,
+        summary.ttft_p99,
+        summary.ticks,
+        summary.max_running,
+        summary.preemptions,
+        summary.recompute_tokens,
+        watch.stall_count(),
+        summary.elapsed_ms
     );
     Ok(())
 }
@@ -120,69 +165,73 @@ struct Summary {
     ttft_p99: f64,
     ticks: u64,
     max_running: usize,
+    preemptions: u64,
+    recompute_tokens: u64,
     elapsed_ms: u128,
-}
-
-struct JobCtx {
-    id: u32,
-    deadline: Instant,
-    tx: mpsc::Sender<Sig>,
 }
 
 async fn run(args: &Args) -> anyhow::Result<Summary> {
     let started = Instant::now();
-    let (arr_tx, mut arr_rx) = mpsc::unbounded_channel::<Request>();
+    let tasks = args.tasks;
+    let pct = args.interactive_pct.min(100);
+    let gap = Duration::from_millis((args.secs * 1000 / u64::from(tasks.max(1))).max(1));
+    let tick = Duration::from_millis(args.step_ms.max(1));
+
+    let (arr_tx, mut arr_rx) = mpsc::unbounded_channel::<Arrival>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Record>();
 
-    // 到达发生器：在 secs 内均匀投放
-    let tasks = args.tasks;
-    let gap = Duration::from_millis((args.secs * 1000 / tasks.max(1) as u64).max(1));
     let _producer = tokio::spawn(async move {
         for id in 0..tasks {
-            let req = Request {
-                id,
-                attempt: 0,
-                class: lacbs_core::model::Class::Interactive,
-                arrival_us: 0,
-                prompt_tokens: 64 + (id % 4) * 16,
-                output_tokens: 8 + (id % 5) * 4,
-                ttft_slo_us: 120_000,
-                tpot_slo_us: 100_000,
+            let interactive = id % 100 < pct;
+            let (class, prompt, output, slo_us) = if interactive {
+                (Class::Interactive, 64, 6 + (id % 4) * 2, 60_000)
+            } else {
+                (Class::Batch, 128, 24 + (id % 6) * 4, 400_000)
             };
-            if arr_tx.send(req).is_err() {
+            let at = Instant::now();
+            if arr_tx
+                .send(Arrival {
+                    id,
+                    class,
+                    at,
+                    deadline: at + Duration::from_micros(slo_us),
+                    prompt,
+                    output,
+                    slo_us,
+                })
+                .is_err()
+            {
                 break;
             }
             tokio::time::sleep(gap).await;
         }
     });
 
-    let tick = Duration::from_millis(args.step_ms.max(1));
-    let mut waiting: Vec<JobCtx> = Vec::new();
-    let mut running: Vec<JobCtx> = Vec::new();
-    let mut ticks = 0u64;
-    let mut max_running = 0usize;
+    let mut waiting: Vec<Pending> = Vec::new();
+    let mut running: Vec<Running> = Vec::new();
+    let mut arrivals_open = true;
     let (mut completed, mut rejected, mut met) = (0u32, 0u32, 0u32);
     let mut ttfts: Vec<f64> = Vec::new();
-    let mut arrivals_open = true;
+    let mut ticks = 0u64;
+    let mut max_running = 0usize;
+    let (mut preemptions, mut recompute_tokens) = (0u64, 0u64);
 
     loop {
-        // 1) 收新请求，起任务
         if arrivals_open {
-            while let Ok(req) = arr_rx.try_recv() {
-                let arrival = Instant::now();
-                let deadline = arrival + Duration::from_micros(req.ttft_slo_us);
-                let (tx, rx) = mpsc::channel::<Sig>(4);
-                let done = done_tx.clone();
-                let output = req.output_tokens;
-                let prompt = req.prompt_tokens;
-                let ttft_slo = req.ttft_slo_us;
-                tokio::spawn(async move {
-                    job_loop(prompt, output, ttft_slo, arrival, rx, done).await;
-                });
-                waiting.push(JobCtx {
-                    id: req.id,
-                    deadline,
-                    tx,
+            while let Ok(a) = arr_rx.try_recv() {
+                waiting.push(Pending {
+                    id: a.id,
+                    class: a.class,
+                    arrival: a.at,
+                    deadline: a.deadline,
+                    prompt: a.prompt,
+                    output: a.output,
+                    state: Arc::new(JobState {
+                        produced: AtomicU32::new(0),
+                        first_ms: AtomicU64::new(0),
+                        slo_us: a.slo_us,
+                    }),
+                    ready_at: Instant::now(),
                 });
             }
             if arr_rx.is_closed() {
@@ -190,80 +239,98 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             }
         }
 
-        // 2) 拒绝无望
+        // 拒绝：还没出过首字、且已过截止期
         let now = Instant::now();
-        waiting.retain(|j| {
-            if now >= j.deadline {
-                let _ = j.tx.try_send(Sig::Reject);
-                false
+        let mut i = 0;
+        while i < waiting.len() {
+            let w = &waiting[i];
+            if w.state.first_ms.load(Ordering::Relaxed) == 0 && now >= w.deadline {
+                waiting.remove(i);
+                rejected += 1;
             } else {
-                true
+                i += 1;
             }
-        });
-
-        // 3) 准入
-        match args.mode {
-            Mode::Edf => waiting.sort_by_key(|j| (j.deadline, j.id)),
-            Mode::Fifo => waiting.sort_by_key(|j| j.id),
         }
-        while running.len() < args.max_seqs {
-            let Some(job) = waiting.first() else { break };
-            if job.tx.try_send(Sig::Admit).is_err() {
-                waiting.remove(0);
+
+        match args.mode {
+            Mode::Edf => waiting.sort_by_key(|w| (w.deadline, w.id)),
+            Mode::Fifo => waiting.sort_by_key(|w| w.id),
+        }
+        let mut i = 0;
+        while i < waiting.len() {
+            if running.len() < args.max_seqs {
+                if waiting[i].ready_at > Instant::now() {
+                    i += 1;
+                    continue;
+                }
+                let job = waiting.remove(i);
+                spawn_job(job, &done_tx, &mut running);
                 continue;
             }
-            let job = waiting.remove(0);
-            running.push(job);
+            if !args.preempt || waiting[i].class != Class::Interactive {
+                break;
+            }
+            let victim = running
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.class == Class::Batch)
+                .max_by_key(|(_, r)| {
+                    r.output
+                        .saturating_sub(r.state.produced.load(Ordering::Relaxed))
+                })
+                .map(|(idx, _)| idx);
+            let Some(v) = victim else { break };
+            let r = running.remove(v);
+            r.handle.abort();
+            let produced = r.state.produced.load(Ordering::Relaxed);
+            recompute_tokens += u64::from(r.prompt) + u64::from(produced);
+            preemptions += 1;
+            r.state.produced.store(0, Ordering::Relaxed);
+            waiting.push(Pending {
+                id: r.id,
+                class: r.class,
+                arrival: r.arrival,
+                deadline: r.deadline,
+                prompt: r.prompt,
+                output: r.output,
+                state: r.state,
+                ready_at: Instant::now() + tick,
+            });
         }
 
-        // 4) 每个在跑的任务发一个出词许可
-        for j in &running {
-            let _ = j.tx.try_send(Sig::Step);
+        for r in &running {
+            let _ = r.tx.try_send(Sig::Step);
         }
         ticks += 1;
         max_running = max_running.max(running.len());
 
-        // 5) 回收完成的槽位
         while let Ok(rec) = done_rx.try_recv() {
-            match rec.outcome {
-                Outcome::Completed { ttft } => {
-                    completed += 1;
-                    if rec.met {
-                        met += 1;
-                    }
-                    ttfts.push(ttft.as_secs_f64() * 1000.0);
-                }
-                Outcome::Rejected => rejected += 1,
+            completed += 1;
+            if rec.met {
+                met += 1;
             }
+            ttfts.push(rec.ttft.as_secs_f64() * 1000.0);
         }
-        // 任务结束后会自行退出；用 running 中 tx 的 closed 状态回收槽位
-        running.retain(|j| !j.tx.is_closed());
+        running.retain(|r| !r.tx.is_closed());
 
         if !arrivals_open && waiting.is_empty() && running.is_empty() {
-            // 等 done 队列排空（任务可能刚退出）
             tokio::task::yield_now().await;
             while let Ok(rec) = done_rx.try_recv() {
-                match rec.outcome {
-                    Outcome::Completed { ttft } => {
-                        completed += 1;
-                        if rec.met {
-                            met += 1;
-                        }
-                        ttfts.push(ttft.as_secs_f64() * 1000.0);
-                    }
-                    Outcome::Rejected => rejected += 1,
+                completed += 1;
+                if rec.met {
+                    met += 1;
                 }
+                ttfts.push(rec.ttft.as_secs_f64() * 1000.0);
             }
             if done_rx.is_empty() {
                 break;
             }
         }
-
         tokio::time::sleep(tick).await;
     }
 
     ttfts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let pct = |p: f64| -> f64 {
+    let pct_fn = |p: f64| -> f64 {
         if ttfts.is_empty() {
             0.0
         } else {
@@ -272,58 +339,61 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     };
 
     Ok(Summary {
-        tasks: args.tasks,
+        tasks,
         completed,
         rejected,
         met,
-        ttft_p50: pct(50.0),
-        ttft_p99: pct(99.0),
+        ttft_p50: pct_fn(50.0),
+        ttft_p99: pct_fn(99.0),
         ticks,
         max_running,
+        preemptions,
+        recompute_tokens,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
 
-async fn job_loop(
-    prompt_tokens: u32,
-    output_tokens: u32,
-    ttft_slo_us: u64,
-    arrival: Instant,
-    mut rx: mpsc::Receiver<Sig>,
-    done: mpsc::UnboundedSender<Record>,
-) {
-    match rx.recv().await {
-        Some(Sig::Admit) => {
-            // 首字前的 prefill 计算
-            spin(Duration::from_micros(u64::from(prompt_tokens)));
-        }
-        _ => {
-            let _ = done.send(Record {
-                outcome: Outcome::Rejected,
-                met: false,
-            });
-            return;
-        }
-    }
-    let mut produced = 0u32;
-    let mut ttft: Option<Duration> = None;
-    while produced < output_tokens {
+fn spawn_job(job: Pending, done: &mpsc::UnboundedSender<Record>, running: &mut Vec<Running>) {
+    let (tx, rx) = mpsc::channel::<Sig>(4);
+    let _ = tx.try_send(Sig::Admit); // 先发准入，job 任务才开始 prefill
+    let state = job.state.clone();
+    let arrival = job.arrival;
+    let output = job.output;
+    let prompt = job.prompt;
+    let done = done.clone();
+    let handle = tokio::spawn(async move {
+        let mut rx = rx;
         match rx.recv().await {
-            Some(Sig::Step) => {
-                spin(Duration::from_micros(WORK_US));
-                if produced == 0 {
-                    ttft = Some(arrival.elapsed());
-                }
-                produced += 1;
-            }
-            // None = 调度器丢弃了通道（本版不会发生）；Admit/Reject 属异常序列
-            _ => break,
+            Some(Sig::Admit) => spin(Duration::from_micros(u64::from(prompt))),
+            _ => return,
         }
-    }
-    let ttft = ttft.unwrap_or_else(|| arrival.elapsed());
-    let met = ttft.as_micros() as u64 <= ttft_slo_us;
-    let _ = done.send(Record {
-        outcome: Outcome::Completed { ttft },
-        met,
+        while state.produced.load(Ordering::Relaxed) < output {
+            match rx.recv().await {
+                Some(Sig::Step) => {
+                    spin(Duration::from_micros(WORK_US));
+                    let n = state.produced.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 {
+                        state
+                            .first_ms
+                            .store(arrival.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    }
+                }
+                _ => return,
+            }
+        }
+        let ttft = Duration::from_millis(state.first_ms.load(Ordering::Relaxed));
+        let met = ttft.as_micros() as u64 <= state.slo_us;
+        let _ = done.send(Record { ttft, met });
+    });
+    running.push(Running {
+        id: job.id,
+        class: job.class,
+        arrival: job.arrival,
+        deadline: job.deadline,
+        prompt: job.prompt,
+        output: job.output,
+        state: job.state,
+        tx,
+        handle,
     });
 }
