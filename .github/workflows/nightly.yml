@@ -1,0 +1,30 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 02:00 CST
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 4
+
+jobs:
+  full-gate:
+    name: full gate (dial9 + hotpath)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cache dial9 CLI
+        id: dial9-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/dial9
+          key: dial9-cli-0.5.5
+      - name: install dial9 CLI
+        if: steps.dial9-cache.outputs.cache-hit != 'true'
+        run: cargo install dial9 --features cli --locked
+      - name: full tool gate
+        run: bash scripts/gate.sh
