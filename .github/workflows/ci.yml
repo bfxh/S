@@ -102,8 +102,8 @@ jobs:
       - uses: actions/checkout@v5
       - name: Fetch pinned trit release
         run: |
-          curl -fsSL -o trit.tar.gz https://github.com/bfxh/trit/releases/download/v0.3.1/trit-linux-x86_64.tar.gz
-          echo "06515e827a06f6b220f434530a4bf25a3223603ec6b642562205f756bb687b9a  trit.tar.gz" | sha256sum -c -
+          curl -fsSL -o trit.tar.gz https://github.com/bfxh/trit/releases/download/v0.3.2/trit-linux-x86_64.tar.gz
+          echo "e9b0374f5624b05c3685a929e824bb997886d48d9adb130f841d15a964d4cea1  trit.tar.gz" | sha256sum -c -
           tar -xzf trit.tar.gz
       - name: Verify admission policy (SAT)
         run: ./trit-linux-x86_64 verify policy/admission.json

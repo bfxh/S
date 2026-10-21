@@ -125,7 +125,7 @@ py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.ex
 CI **不把 trit 引入 cargo 依赖图**：`deny.toml` 仍是 `unknown-git = "deny"`，而 `trit-core` 未发布到
 crates.io。fixture 把工具的判定固化下来，测试只断言语义性质，不重实现三值求值器。
 
-独立策略门（`policy (trit verify)`）走另一条线：下载固定版本 `trit v0.3.1` 的 release 资产，
+独立策略门（`policy (trit verify)`）走另一条线：下载固定版本 `trit v0.3.2` 的 release 资产，
 用 SHA256 钉住后对 `policy/admission.json` 跑 SAT/BDD 两遍。它不进依赖图、不需要 git 源，
 失败会让 CI 判红；fixture 测运行时布尔表，策略门测规格本身。
 变异复算：删掉 `contended` 条件 ⇒ `reject_decision_table` 红；把 K3 的 `1,X,0,1` 改成 `X` ⇒
