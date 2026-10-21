@@ -19,5 +19,5 @@ liveliness = ["lacbs-obs/liveliness"]
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-lacbs-core = { path = "../lacbs-core" }
-lacbs-obs = { path = "../lacbs-obs", default-features = false }
+lacbs-core = { version = "0.1.0", path = "../lacbs-core" }
+lacbs-obs = { version = "0.1.0", path = "../lacbs-obs", default-features = false }

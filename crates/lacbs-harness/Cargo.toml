@@ -16,5 +16,5 @@ hotpath = ["lacbs-obs/hotpath", "dep:hotpath"]
 tokio = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
-lacbs-obs = { path = "../lacbs-obs", default-features = false }
+lacbs-obs = { version = "0.1.0", path = "../lacbs-obs", default-features = false }
 hotpath = { version = "0.28.6", features = ["hotpath"], optional = true }

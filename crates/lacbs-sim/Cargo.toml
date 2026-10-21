@@ -10,5 +10,5 @@ name = "sim"
 path = "src/main.rs"
 
 [dependencies]
-lacbs-core = { path = "../lacbs-core" }
+lacbs-core = { version = "0.1.0", path = "../lacbs-core" }
 anyhow = { workspace = true }
