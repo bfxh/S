@@ -107,6 +107,28 @@ tokio-console
 - `shortest` 在两个参数点都没有稳定优势，不作为推荐。
 - 复跑：`py -3.11 scripts/exec_ab.py --samples 10 -- --secs 4 --tasks 256 --interactive-pct 30 --swap --swap-slots 8 --victim slack --batch-slo-us 200000`
 
+### 真实到达切片（`--arrivals-csv`）
+
+执行层现在可以直接吃回放 CSV：`--arrivals-csv <trace.csv> --slice-start-s <s> --slice-s <s> --target-load <ρ>`，
+按容量把 trace 时间缩放到墙钟，只取指定切片。
+
+实验：ServeGen `A1_language_m-large`，取最忙的 60 秒（起 3060 s，138 条），target_load 1.0，换出 8 槽，
+批处理 SLO 收紧到 200 ms；`longest`/`slack` 各 6 次、不抢占 3 次。
+
+| 配置 | met（中位数 [min,max]） | p99 | 抢占 |
+|---|---|---|---|
+| 不抢占 | 69 [69, 70] | 168 ms | 0 |
+| `longest` | **101 [100, 102]** | **116.5 ms** | 29 [28, 32] |
+| `slack` | 94 [93, 96] | 140.5 ms | 29.5 [25, 34] |
+
+三个结论：
+
+1. **抢占在真实突发到达上是明显正收益**：met 69 → 101（+46%），p99 168 → 116.5 ms。
+2. **victim 排名翻转**：均匀到达的微基准里 `slack` 赢，真实切片里 `longest` 赢，
+   且区间不重叠（101 [100,102] vs 94 [93,96]）。**之前的"紧 SLO 推荐 slack"只在均匀到达下成立**，
+   默认保持 `longest`。
+3. 这条翻转是方法学提醒：微基准结论必须用真实到达切片复核，不能直接外推。
+
 ## 已知边界
 
 - **抢占只支持"交互式挤批处理"一个方向**；换出是"保留进度 + 固定代价"，没有真实 KV 拷贝。

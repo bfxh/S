@@ -55,6 +55,10 @@ struct Args {
     swap_us: u64,
     victim: Victim,
     batch_slo_us: u64,
+    arrivals_csv: Option<String>,
+    slice_s: f64,
+    slice_start_s: f64,
+    target_load: f64,
 }
 
 impl Args {
@@ -73,6 +77,10 @@ impl Args {
             swap_us: 2_000,
             victim: Victim::Longest,
             batch_slo_us: 400_000,
+            arrivals_csv: None,
+            slice_s: 60.0,
+            slice_start_s: 0.0,
+            target_load: 0.8,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -89,6 +97,10 @@ impl Args {
                 "--swap-slots" => a.swap_slots = val()?.parse()?,
                 "--swap-us" => a.swap_us = val()?.parse()?,
                 "--batch-slo-us" => a.batch_slo_us = val()?.parse()?,
+                "--arrivals-csv" => a.arrivals_csv = Some(val()?),
+                "--slice-s" => a.slice_s = val()?.parse()?,
+                "--slice-start-s" => a.slice_start_s = val()?.parse()?,
+                "--target-load" => a.target_load = val()?.parse()?,
                 "--victim" => {
                     a.victim = match val()?.as_str() {
                         "longest" => Victim::Longest,
@@ -176,7 +188,7 @@ fn main() -> anyhow::Result<()> {
 
     let summary = obs.rt.block_on(run(&args))?;
     println!(
-        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"swaps\":{},\"victim\":\"{}\",\"stalls\":{},\"elapsed_ms\":{}}}",
+        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"swaps\":{},\"victim\":\"{}\",\"source\":\"{}\",\"stalls\":{},\"elapsed_ms\":{}}}",
         summary.tasks,
         summary.completed,
         summary.rejected,
@@ -189,6 +201,7 @@ fn main() -> anyhow::Result<()> {
         summary.recompute_tokens,
         summary.swaps,
         summary.victim,
+        summary.source,
         watch.stall_count(),
         summary.elapsed_ms
     );
@@ -208,6 +221,7 @@ struct Summary {
     recompute_tokens: u64,
     swaps: u64,
     victim: &'static str,
+    source: &'static str,
     elapsed_ms: u128,
 }
 
@@ -222,14 +236,52 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     let (arr_tx, mut arr_rx) = mpsc::unbounded_channel::<Arrival>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Record>();
 
+    // 到达计划：(墙钟偏移秒, 类别, prompt, output, slo_us, id)
+    let (plan, source, wall_s) = match args.arrivals_csv.as_deref() {
+        Some(path) => {
+            let p = build_trace_plan(path, args, batch_slo)?;
+            let wall = p.last().map_or(0.0, |x| x.0);
+            eprintln!(
+                "trace arrivals: {} 条，切片 {:.0}s，墙钟约 {:.1}s（target_load={:.2}）",
+                p.len(),
+                args.slice_s,
+                wall,
+                args.target_load
+            );
+            (p, "csv", wall)
+        }
+        None => {
+            let mut p = Vec::with_capacity(tasks as usize);
+            for id in 0..tasks {
+                let interactive = id % 100 < pct;
+                let (class, prompt, output, slo_us) = if interactive {
+                    (Class::Interactive, 64, 6 + (id % 4) * 2, 60_000)
+                } else {
+                    (Class::Batch, 128, 24 + (id % 6) * 4, batch_slo)
+                };
+                p.push((
+                    id as f64 * gap.as_secs_f64(),
+                    class,
+                    prompt,
+                    output,
+                    slo_us,
+                    id,
+                ));
+            }
+            (p, "uniform", 0.0)
+        }
+    };
+    let _ = wall_s;
+    let n_tasks = plan.len() as u32;
+
     let _producer = tokio::spawn(async move {
-        for id in 0..tasks {
-            let interactive = id % 100 < pct;
-            let (class, prompt, output, slo_us) = if interactive {
-                (Class::Interactive, 64, 6 + (id % 4) * 2, 60_000)
-            } else {
-                (Class::Batch, 128, 24 + (id % 6) * 4, batch_slo)
-            };
+        let base = Instant::now();
+        for (offset_s, class, prompt, output, slo_us, id) in plan {
+            let target = base + Duration::from_secs_f64(offset_s);
+            let now = Instant::now();
+            if target > now {
+                tokio::time::sleep(target - now).await;
+            }
             let at = Instant::now();
             if arr_tx
                 .send(Arrival {
@@ -245,7 +297,6 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             {
                 break;
             }
-            tokio::time::sleep(gap).await;
         }
     });
 
@@ -417,7 +468,7 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     };
 
     Ok(Summary {
-        tasks,
+        tasks: n_tasks,
         completed,
         rejected,
         met,
@@ -433,8 +484,61 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             Victim::Shortest => "shortest",
             Victim::Slack => "slack",
         },
+        source,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+/// (墙钟偏移秒, 类别, prompt, output, slo_us, id)
+type PlanItem = (f64, Class, u32, u32, u64, u32);
+
+/// 读回放 CSV，按容量把 trace 时间缩放到墙钟，只取前 `slice_s` 秒。
+fn build_trace_plan(path: &str, args: &Args, batch_slo: u64) -> anyhow::Result<Vec<PlanItem>> {
+    let text = std::fs::read_to_string(path)?;
+    let mut rows: Vec<(f64, Class, u32, u32)> = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 || line.trim().is_empty() {
+            continue;
+        }
+        let mut it = line.split(',');
+        let t: f64 = it.next().unwrap_or("").trim().parse()?;
+        let p: u32 = it.next().unwrap_or("").trim().parse()?;
+        let o: u32 = it.next().unwrap_or("").trim().parse()?;
+        let class = match it.next().unwrap_or("batch").trim() {
+            "interactive" => Class::Interactive,
+            _ => Class::Batch,
+        };
+        if p > 0 && o > 0 && t >= args.slice_start_s && t < args.slice_start_s + args.slice_s {
+            rows.push((t, class, p, o));
+        }
+    }
+    if rows.is_empty() {
+        anyhow::bail!("{path} 在 {:.0}s 切片内没有请求", args.slice_s);
+    }
+    rows.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("时间非 NaN"));
+
+    let n = rows.len() as f64;
+    let avg_out = rows.iter().map(|r| f64::from(r.3)).sum::<f64>() / n;
+    let step_s = args.step_ms.max(1) as f64 / 1000.0;
+    let capacity = args.max_seqs as f64 / (avg_out * step_s);
+    let observed = n / args.slice_s;
+    let k = observed / (args.target_load.max(0.01) * capacity);
+    eprintln!(
+        "trace: rows={n} observed={observed:.2}/s capacity={capacity:.2}/s scale={k:.4} avg_out={avg_out:.0}"
+    );
+
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(id, (t, class, p, o))| {
+            let slo = if class == Class::Interactive {
+                60_000
+            } else {
+                batch_slo
+            };
+            ((t - args.slice_start_s) * k, class, p, o, slo, id as u32)
+        })
+        .collect())
 }
 
 fn spawn_job(job: Pending, done: &mpsc::UnboundedSender<Record>, running: &mut Vec<Running>) {
