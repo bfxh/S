@@ -99,7 +99,8 @@ async fn run(args: &Args) -> u64 {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let entered = Arc::new(AtomicUsize::new(0));
-        for _ in 0..args.workers {
+        // 多放一个：liveliness 监控任务会自唤醒占住一个 worker，4 个阻塞任务占不满 4 个 worker
+        for _ in 0..args.workers + 1 {
             let entered = entered.clone();
             tokio::spawn(async move {
                 entered.fetch_add(1, Ordering::SeqCst);
@@ -108,11 +109,14 @@ async fn run(args: &Args) -> u64 {
                 }
             });
         }
-        // 等阻塞任务真正占住 worker，否则后面的 decode 任务会先被抢到
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // 等阻塞任务真正占住 worker：轮询而不是固定睡眠，避免冷启动/慢机器上的偶发假红
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered.load(Ordering::SeqCst) < args.workers && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         eprintln!(
             "进入阻塞的 worker 数 = {}/{}",
-            entered.load(Ordering::SeqCst),
+            entered.load(Ordering::SeqCst).min(args.workers),
             args.workers
         );
     }
