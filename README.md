@@ -17,6 +17,7 @@ Rust 实现。**结论：非平稳负载下存在逐阶段 oracle gap（预注�
 | [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放与预注册批次（4/6 ≥5%） |
 | [docs/M2-RESULT.md](docs/M2-RESULT.md) | M2 规则控制器实测：5/6 劣于静态档，判定不上线 |
 | [docs/EXEC.md](docs/EXEC.md) | 执行层：tokio 任务上的准入/拒绝/抢占/换出，A/B 读数 |
+| [docs/TERNARY.md](docs/TERNARY.md) | 三值准入：拒绝规则在 K3/Ł3/B3 下的决策表与语义选择 |
 | [docs/PROCESS.md](docs/PROCESS.md) | 流程：判据分级、基线纪律、发布与回滚 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 提交前四件套与规则 |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
