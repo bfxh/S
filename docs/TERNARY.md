@@ -70,8 +70,8 @@ B3 把 `X` 当"毒值"，一沾就吸收：
 
 ## 5. 如果"三进制"指 base-3 编码
 
-本地工具（`D:\KF\ternary-logic-analyzer`）的**枚举**已经是三进制：第 i 个变量的取值由赋值编号的
-第 i 个三进制位决定（`crates/tla-core/src/bits.rs`、`eval.rs` 的解码）。
+本地工具（`D:\KF\trit`）的**枚举**已经是三进制：第 i 个变量的取值由赋值编号的
+第 i 个三进制位决定（`crates/trit-core/src/bits.rs`、`eval.rs` 的解码）。
 但**求值**用双位平面（`ones` / `unknowns`，2 bit/trit），不是 base-3 打包。
 
 算术对比（12 变量，3^12 = 531,441 组，估算非实测）：
@@ -98,12 +98,12 @@ B3 把 `X` 当"毒值"，一沾就吸收：
 ## 7. 复现
 
 ```bash
-# 工具：D:\KF\ternary-logic-analyzer（公开仓 bfxh/ternary-logic-analyzer）
-CARGO_BUILD_JOBS=1 cargo build -q -p tla-cli --release
+# 工具：D:\KF\trit（公开仓 bfxh/trit）
+CARGO_BUILD_JOBS=1 cargo build -q -p trit-cli --release
 
-tla table "i | (h & c)" -f markdown      # K3，27 行（含 i=X）
-tla -a bochvar table "i | (h & c)"       # B3 对照
-tla eval "h & c" -s "h=X,c=0"            # K3/Ł3 => 0；B3 => X
+trit table "i | (h & c)" -f markdown      # K3，27 行（含 i=X）
+trit -a bochvar table "i | (h & c)"       # B3 对照
+trit eval "h & c" -s "h=X,c=0"            # K3/Ł3 => 0；B3 => X
 ```
 
 ## 8. 门禁
@@ -115,13 +115,13 @@ tla eval "h & c" -s "h=X,c=0"            # K3/Ł3 => 0；B3 => X
 | `reject_decision_table` | `src/sim.rs` 单元测试 | 运行时精确决策表的 16 种布尔组合：装不下必拒、开关关闭不拒、无竞争不拒、其余恰好等于 `hopeless` |
 | `k3_*` / `b3_*` 共 3 个 | `tests/ternary_admission.rs` | K3 的硬约束与空槽性质、18 行计数 `10/5/3`；B3 把硬约束毒成 `X` 的反证、计数 `5/3/10` |
 
-fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 tla 的输出，不是手写。重算：
+fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 trit 的输出，不是手写。重算：
 
 ```bash
-py -3.11 scripts/gen_ternary_fixture.py --tla D:/KF/ternary-logic-analyzer/target/release/tla.exe
+py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.exe
 ```
 
-CI **不装 tla**、也不引入 git 依赖：`deny.toml` 是 `unknown-git = "deny"`，而 `tla-core` 未发布到
+CI **不装 trit**、也不引入 git 依赖：`deny.toml` 是 `unknown-git = "deny"`，而 `trit-core` 未发布到
 crates.io。fixture 把工具的判定固化下来，测试只断言语义性质，不重实现三值求值器。
 变异复算：删掉 `contended` 条件 ⇒ `reject_decision_table` 红；把 K3 的 `1,X,0,1` 改成 `X` ⇒
 两个 K3 测试红。
