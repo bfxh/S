@@ -114,6 +114,7 @@ trit eval "h & c" -s "h=X,c=0"            # K3/Ł3 => 0；B3 => X
 |---|---|---|
 | `reject_decision_table` | `src/sim.rs` 单元测试 | 运行时精确决策表的 16 种布尔组合：装不下必拒、开关关闭不拒、无竞争不拒、其余恰好等于 `hopeless` |
 | `k3_*` / `b3_*` 共 3 个 | `tests/ternary_admission.rs` | K3 的硬约束与空槽性质、18 行计数 `10/5/3`；B3 把硬约束毒成 `X` 的反证、计数 `5/3/10` |
+| `policy (trit verify)` | CI 独立 job + `policy/admission.json` | 用发布版 trit 的 `verify` 在 SAT/BDD 两引擎上检查同一份准入规格 |
 
 fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 trit 的输出，不是手写。重算：
 
@@ -121,8 +122,12 @@ fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 trit 的输出，
 py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.exe
 ```
 
-CI **不装 trit**、也不引入 git 依赖：`deny.toml` 是 `unknown-git = "deny"`，而 `trit-core` 未发布到
+CI **不把 trit 引入 cargo 依赖图**：`deny.toml` 仍是 `unknown-git = "deny"`，而 `trit-core` 未发布到
 crates.io。fixture 把工具的判定固化下来，测试只断言语义性质，不重实现三值求值器。
+
+独立策略门（`policy (trit verify)`）走另一条线：下载固定版本 `trit v0.3.0` 的 release 资产，
+用 SHA256 钉住后对 `policy/admission.json` 跑 SAT/BDD 两遍。它不进依赖图、不需要 git 源，
+失败会让 CI 判红；fixture 测运行时布尔表，策略门测规格本身。
 变异复算：删掉 `contended` 条件 ⇒ `reject_decision_table` 红；把 K3 的 `1,X,0,1` 改成 `X` ⇒
 两个 K3 测试红。
 
