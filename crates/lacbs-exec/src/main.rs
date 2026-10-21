@@ -489,12 +489,11 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     })
 }
 
+/// (墙钟偏移秒, 类别, prompt, output, slo_us, id)
+type PlanItem = (f64, Class, u32, u32, u64, u32);
+
 /// 读回放 CSV，按容量把 trace 时间缩放到墙钟，只取前 `slice_s` 秒。
-fn build_trace_plan(
-    path: &str,
-    args: &Args,
-    batch_slo: u64,
-) -> anyhow::Result<Vec<(f64, Class, u32, u32, u64, u32)>> {
+fn build_trace_plan(path: &str, args: &Args, batch_slo: u64) -> anyhow::Result<Vec<PlanItem>> {
     let text = std::fs::read_to_string(path)?;
     let mut rows: Vec<(f64, Class, u32, u32)> = Vec::new();
     for (i, line) in text.lines().enumerate() {
