@@ -32,7 +32,7 @@ def main() -> None:
     rows = []
     for i in range(ns.samples):
         out = subprocess.run(
-            [bin_path, *extra], capture_output=True, text=True, timeout=120
+            [bin_path, *extra], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120
         )
         line = [l for l in out.stdout.splitlines() if l.startswith("{")]
         if not line:
