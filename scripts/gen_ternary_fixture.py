@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""从本地 tla 生成三值准入 fixture（K3 与 B3 各一份）。
+"""从本地 trit 生成三值准入 fixture（K3 与 B3 各一份）。
 
 用法：
-  py -3.11 scripts/gen_ternary_fixture.py --tla D:/KF/ternary-logic-analyzer/target/release/tla.exe
+  py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.exe
 
 产物：crates/lacbs-core/tests/fixtures/ternary_admission_{k3,b3}.csv
-fixture 是 tla 的输出，不是手写的；语义改动时重跑本脚本。
+fixture 是 trit 的输出，不是手写的；语义改动时重跑本脚本。
 """
 
 import argparse
@@ -37,12 +37,12 @@ def gen(tla: str, alg: str, path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tla", default="tla", help="tla 可执行文件路径")
+    ap.add_argument("--trit", default="trit", help="trit 可执行文件路径")
     ns = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     for alg, tag in ALGS.items():
         path = OUT / f"ternary_admission_{tag}.csv"
-        gen(ns.tla, alg, path)
+        gen(ns.trit, alg, path)
         print(path)
 
 
