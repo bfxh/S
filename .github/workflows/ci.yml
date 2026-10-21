@@ -94,3 +94,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: crate-ci/typos@v1.51.1
+
+  policy:
+    name: policy (trit verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Fetch pinned trit release
+        run: |
+          curl -fsSL -o trit.tar.gz https://github.com/bfxh/trit/releases/download/v0.3.0/trit-linux-x86_64.tar.gz
+          echo "30c14df1a48db80d85fbc92d1c6e7e7c408f83f0bb033713468e264de40102cd  trit.tar.gz" | sha256sum -c -
+          tar -xzf trit.tar.gz
+      - name: Verify admission policy (SAT)
+        run: ./trit-linux-x86_64 verify policy/admission.json
+      - name: Verify admission policy (BDD)
+        run: ./trit-linux-x86_64 verify --engine bdd policy/admission.json
