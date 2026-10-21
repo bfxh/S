@@ -19,6 +19,16 @@ enum Mode {
     Edf,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Victim {
+    /// 剩余输出最多（原策略）
+    Longest,
+    /// 剩余输出最少（最先能跑完）
+    Shortest,
+    /// 剩余 slack 最多（最不着急）
+    Slack,
+}
+
 #[derive(Clone, Copy)]
 enum Sig {
     Admit,
@@ -43,6 +53,8 @@ struct Args {
     swap: bool,
     swap_slots: usize,
     swap_us: u64,
+    victim: Victim,
+    batch_slo_us: u64,
 }
 
 impl Args {
@@ -59,6 +71,8 @@ impl Args {
             swap: false,
             swap_slots: 4,
             swap_us: 2_000,
+            victim: Victim::Longest,
+            batch_slo_us: 400_000,
         };
         let mut it = std::env::args().skip(1);
         while let Some(flag) = it.next() {
@@ -74,6 +88,15 @@ impl Args {
                 "--swap" => a.swap = true,
                 "--swap-slots" => a.swap_slots = val()?.parse()?,
                 "--swap-us" => a.swap_us = val()?.parse()?,
+                "--batch-slo-us" => a.batch_slo_us = val()?.parse()?,
+                "--victim" => {
+                    a.victim = match val()?.as_str() {
+                        "longest" => Victim::Longest,
+                        "shortest" => Victim::Shortest,
+                        "slack" => Victim::Slack,
+                        other => bail!("未知 victim: {other}"),
+                    }
+                }
                 "--mode" => {
                     a.mode = match val()?.as_str() {
                         "fifo" => Mode::Fifo,
@@ -153,7 +176,7 @@ fn main() -> anyhow::Result<()> {
 
     let summary = obs.rt.block_on(run(&args))?;
     println!(
-        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"swaps\":{},\"stalls\":{},\"elapsed_ms\":{}}}",
+        "{{\"tasks\":{},\"completed\":{},\"rejected\":{},\"met_ttft\":{},\"ttft_p50_ms\":{:.1},\"ttft_p99_ms\":{:.1},\"ticks\":{},\"max_running\":{},\"preemptions\":{},\"recompute_tokens\":{},\"swaps\":{},\"victim\":\"{}\",\"stalls\":{},\"elapsed_ms\":{}}}",
         summary.tasks,
         summary.completed,
         summary.rejected,
@@ -165,6 +188,7 @@ fn main() -> anyhow::Result<()> {
         summary.preemptions,
         summary.recompute_tokens,
         summary.swaps,
+        summary.victim,
         watch.stall_count(),
         summary.elapsed_ms
     );
@@ -183,6 +207,7 @@ struct Summary {
     preemptions: u64,
     recompute_tokens: u64,
     swaps: u64,
+    victim: &'static str,
     elapsed_ms: u128,
 }
 
@@ -192,6 +217,7 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
     let pct = args.interactive_pct.min(100);
     let gap = Duration::from_millis((args.secs * 1000 / u64::from(tasks.max(1))).max(1));
     let tick = Duration::from_millis(args.step_ms.max(1));
+    let batch_slo = args.batch_slo_us;
 
     let (arr_tx, mut arr_rx) = mpsc::unbounded_channel::<Arrival>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Record>();
@@ -202,7 +228,7 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             let (class, prompt, output, slo_us) = if interactive {
                 (Class::Interactive, 64, 6 + (id % 4) * 2, 60_000)
             } else {
-                (Class::Batch, 128, 24 + (id % 6) * 4, 400_000)
+                (Class::Batch, 128, 24 + (id % 6) * 4, batch_slo)
             };
             let at = Instant::now();
             if arr_tx
@@ -296,14 +322,27 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             if !args.preempt || waiting[i].class != Class::Interactive {
                 break;
             }
+            let now = Instant::now();
+            let tick_ms = i128::from(args.step_ms.max(1));
+            let score = |r: &Running| -> i128 {
+                let remaining = i128::from(
+                    r.output
+                        .saturating_sub(r.state.produced.load(Ordering::Relaxed)),
+                );
+                match args.victim {
+                    Victim::Longest => remaining,
+                    Victim::Shortest => -remaining,
+                    Victim::Slack => {
+                        let slack = r.deadline.saturating_duration_since(now).as_millis() as i128;
+                        slack - remaining * tick_ms
+                    }
+                }
+            };
             let victim = running
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| r.class == Class::Batch)
-                .max_by_key(|(_, r)| {
-                    r.output
-                        .saturating_sub(r.state.produced.load(Ordering::Relaxed))
-                })
+                .max_by_key(|(_, r)| (score(r), r.id))
                 .map(|(idx, _)| idx);
             let Some(v) = victim else { break };
             let r = running.remove(v);
@@ -389,6 +428,11 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
         preemptions,
         recompute_tokens,
         swaps,
+        victim: match args.victim {
+            Victim::Longest => "longest",
+            Victim::Shortest => "shortest",
+            Victim::Slack => "slack",
+        },
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
