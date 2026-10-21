@@ -27,6 +27,8 @@ enum Victim {
     Shortest,
     /// 剩余 slack 最多（最不着急）
     Slack,
+    /// 混合：α×归一化 slack + (1−α)×(1−完成比例)，越大越先换出
+    Hybrid,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +56,7 @@ struct Args {
     swap_slots: usize,
     swap_us: u64,
     victim: Victim,
+    hybrid_alpha: f64,
     batch_slo_us: u64,
     arrivals_csv: Option<String>,
     slice_s: f64,
@@ -76,6 +79,7 @@ impl Args {
             swap_slots: 4,
             swap_us: 2_000,
             victim: Victim::Longest,
+            hybrid_alpha: 0.5,
             batch_slo_us: 400_000,
             arrivals_csv: None,
             slice_s: 60.0,
@@ -96,6 +100,7 @@ impl Args {
                 "--swap" => a.swap = true,
                 "--swap-slots" => a.swap_slots = val()?.parse()?,
                 "--swap-us" => a.swap_us = val()?.parse()?,
+                "--hybrid-alpha" => a.hybrid_alpha = val()?.parse()?,
                 "--batch-slo-us" => a.batch_slo_us = val()?.parse()?,
                 "--arrivals-csv" => a.arrivals_csv = Some(val()?),
                 "--slice-s" => a.slice_s = val()?.parse()?,
@@ -106,6 +111,7 @@ impl Args {
                         "longest" => Victim::Longest,
                         "shortest" => Victim::Shortest,
                         "slack" => Victim::Slack,
+                        "hybrid" => Victim::Hybrid,
                         other => bail!("未知 victim: {other}"),
                     }
                 }
@@ -387,6 +393,20 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
                         let slack = r.deadline.saturating_duration_since(now).as_millis() as i128;
                         slack - remaining * tick_ms
                     }
+                    Victim::Hybrid => {
+                        let produced = i128::from(r.state.produced.load(Ordering::Relaxed));
+                        let slack_ms = r.deadline.saturating_duration_since(now).as_millis() as f64
+                            - remaining as f64 * tick_ms as f64;
+                        let slack_norm = (slack_ms / 400.0).clamp(-2.0, 2.0);
+                        let progress = if r.output == 0 {
+                            1.0
+                        } else {
+                            produced as f64 / f64::from(r.output)
+                        };
+                        let score = args.hybrid_alpha * slack_norm
+                            + (1.0 - args.hybrid_alpha) * (1.0 - progress);
+                        (score * 1_000_000.0) as i128
+                    }
                 }
             };
             let victim = running
@@ -483,6 +503,7 @@ async fn run(args: &Args) -> anyhow::Result<Summary> {
             Victim::Longest => "longest",
             Victim::Shortest => "shortest",
             Victim::Slack => "slack",
+            Victim::Hybrid => "hybrid",
         },
         source,
         elapsed_ms: started.elapsed().as_millis(),
