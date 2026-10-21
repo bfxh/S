@@ -233,9 +233,9 @@ fn run_inner(
                 let infeasible = cfg
                     .kv_capacity_tokens
                     .is_some_and(|cap| pool[i].req.prompt_tokens + pool[i].req.output_tokens > cap);
-                if infeasible
-                    || (cfg.reject_hopeless && contended && hopeless(&pool[i], time, &cfg))
-                {
+                if reject_decision(infeasible, cfg.reject_hopeless, contended, || {
+                    hopeless(&pool[i], time, &cfg)
+                }) {
                     let s = pool.remove(i);
                     report.rejected.push(Rejected {
                         id: s.req.id,
@@ -535,6 +535,17 @@ fn hopeless(seq: &Seq, now: u64, cfg: &Config) -> bool {
     earliest > seq.req.arrival_us + seq.req.ttft_slo_us
 }
 
+/// 无望即拒的精确值决策表：`infeasible ∨ (开关 ∧ contended ∧ hopeless)`。
+/// 闭包保持短路：开关或竞争为假时不计算 `hopeless`。
+fn reject_decision(
+    infeasible: bool,
+    reject_hopeless: bool,
+    contended: bool,
+    hopeless: impl FnOnce() -> bool,
+) -> bool {
+    infeasible || (reject_hopeless && contended && hopeless())
+}
+
 /// 只允许低优先级给高优先级让路；挑剩余输出最多的批处理序列。
 fn pick_victim(running: &[Seq]) -> Option<usize> {
     running
@@ -582,5 +593,37 @@ fn convert(seq: &Seq) -> Finished {
             .saturating_sub(seq.req.arrival_us),
         met_ttft: ttft_us <= seq.req.ttft_slo_us,
         met_tpot: tpot_us <= seq.req.tpot_slo_us && seq.max_gap_us <= 2 * seq.req.tpot_slo_us,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reject_decision;
+
+    #[test]
+    fn reject_decision_table() {
+        for contended in [false, true] {
+            for hopeless in [false, true] {
+                for switch in [false, true] {
+                    assert!(
+                        reject_decision(true, switch, contended, || hopeless),
+                        "KV 装不下的必须拒（switch={switch} contended={contended} hopeless={hopeless}）"
+                    );
+                    assert!(
+                        !reject_decision(false, false, contended, || hopeless),
+                        "开关关闭时不得按无望拒"
+                    );
+                }
+                assert!(
+                    !reject_decision(false, true, false, || hopeless),
+                    "没有竞争时不得按无望拒（hopeless={hopeless}）"
+                );
+                assert_eq!(
+                    reject_decision(false, true, true, || hopeless),
+                    hopeless,
+                    "开关开启且有竞争时，拒绝必须恰好等于 hopeless"
+                );
+            }
+        }
     }
 }
