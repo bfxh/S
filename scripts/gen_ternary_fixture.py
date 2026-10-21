@@ -20,9 +20,9 @@ OUT = ROOT / "crates/lacbs-core/tests/fixtures"
 ALGS = {"kleene": "k3", "bochvar": "b3"}
 
 
-def gen(tla: str, alg: str, path: Path) -> None:
+def gen(trit: str, alg: str, path: Path) -> None:
     out = subprocess.run(
-        [tla, "-a", alg, "table", EXPR, "-f", "json"],
+        [trit, "-a", alg, "table", EXPR, "-f", "json"],
         capture_output=True,
         text=True,
         encoding="utf-8",

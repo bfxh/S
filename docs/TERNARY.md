@@ -71,7 +71,7 @@ B3 把 `X` 当"毒值"，一沾就吸收：
 ## 5. 如果"三进制"指 base-3 编码
 
 本地工具（`D:\KF\trit`）的**枚举**已经是三进制：第 i 个变量的取值由赋值编号的
-第 i 个三进制位决定（`crates/tla-core/src/bits.rs`、`eval.rs` 的解码）。
+第 i 个三进制位决定（`crates/trit-core/src/bits.rs`、`eval.rs` 的解码）。
 但**求值**用双位平面（`ones` / `unknowns`，2 bit/trit），不是 base-3 打包。
 
 算术对比（12 变量，3^12 = 531,441 组，估算非实测）：
@@ -121,7 +121,7 @@ fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 trit 的输出，
 py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.exe
 ```
 
-CI **不装 tla**、也不引入 git 依赖：`deny.toml` 是 `unknown-git = "deny"`，而 `tla-core` 未发布到
+CI **不装 trit**、也不引入 git 依赖：`deny.toml` 是 `unknown-git = "deny"`，而 `trit-core` 未发布到
 crates.io。fixture 把工具的判定固化下来，测试只断言语义性质，不重实现三值求值器。
 变异复算：删掉 `contended` 条件 ⇒ `reject_decision_table` 红；把 K3 的 `1,X,0,1` 改成 `X` ⇒
 两个 K3 测试红。
