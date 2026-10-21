@@ -1,0 +1,21 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 发布前必须过门禁
+        run: bash scripts/gate.sh --skip-dial9 --skip-hotpath
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

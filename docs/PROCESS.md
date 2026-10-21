@@ -51,7 +51,8 @@ G1 进 CI；G2 尽量进 CI；G3 不进 CI（耗时/依赖 trace），但必须�
 ## 5. 发布与回滚
 
 - 版本：`Cargo.toml` 的 workspace version；`CHANGELOG.md` 按 Keep a Changelog。
-- 发布：`git tag vX.Y.Z && git push origin vX.Y.Z`。
+- 发布：先更新 CHANGELOG，再 `git tag vX.Y.Z && git push origin vX.Y.Z`；
+  `Release` workflow 会跑一遍门禁并生成 release notes（门禁红则不出 release）。
 - 回滚：优先 `git revert <commit>`；不重写 `main` 历史。
 - 回滚点写在 CHANGELOG 条目里（"回滚到哪个提交、需要还原哪些配置"）。
 
