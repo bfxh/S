@@ -107,6 +107,34 @@ tokio-console
 - `shortest` 在两个参数点都没有稳定优势，不作为推荐。
 - 复跑：`py -3.11 scripts/exec_ab.py --samples 10 -- --secs 4 --tasks 256 --interactive-pct 30 --swap --swap-slots 8 --victim slack --batch-slo-us 200000`
 
+### 混合评分（`--victim hybrid --hybrid-alpha α`）
+
+`score = α × 归一化 slack + (1−α) × (1−完成比例)`，分数最高者先被换出——
+即"越不着急、越没做多少"的批处理先让位。slack 以 400 ms 为尺度归一化，完成比例 = 已产出/目标输出。
+
+均匀负载（256 任务/4 s，SLO 200 ms，8 次采样）：三档全部重叠——
+
+| victim | met | p99 | 抢占 |
+|---|---|---|---|
+| longest | 171.5 | 190 ms | 33.5 |
+| slack | 170 | 193.5 ms | 28 |
+| hybrid α=0.5 | 172 | 190 ms | 36 |
+
+真实切片（A1 最忙 60 s，SLO 200 ms，5 次采样）：
+
+| victim | met | p99 | 抢占 |
+|---|---|---|---|
+| longest | 101 [100, 105] | 141 ms | 32 |
+| hybrid α=0.25 | 102 [101, 102] | 130.5 ms | 30 |
+| hybrid α=0.5 | 96 [95, 96] | 170 ms | 28 |
+| hybrid α=0.75 | 96 [95, 99] | 143 ms | 30.5 |
+
+- **α 越高（越看重 slack）越差**：0.5/0.75 的 met 区间与 longest 不重叠（95–99 vs 100–105）。
+- α=0.25（75% 权重给完成比例）与 longest 打平（区间重叠），抢占略少、p99 略低；
+  但没有统计上的胜出，**默认仍是 `longest`**。
+- 结论：真实突发下"完成比例"是有用信号，"剩余 slack"作为主权重反而有害；
+  混合评分保留为实验旋钮，不作为默认。
+
 ### 真实到达切片（`--arrivals-csv`）
 
 执行层现在可以直接吃回放 CSV：`--arrivals-csv <trace.csv> --slice-start-s <s> --slice-s <s> --target-load <ρ>`，
