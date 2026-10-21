@@ -1,4 +1,7 @@
-# lacbs — 延迟感知的连续批处理调度器
+# S — 延迟感知的连续批处理调度器
+
+[![CI](https://github.com/bfxh/S/actions/workflows/ci.yml/badge.svg)](https://github.com/bfxh/S/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Rust 实现。**结论：非平稳负载下存在逐阶段 oracle gap（预注册批次 4/6 ≥5%），但窗口级规则控制器抓不住它**
 ——M2 实测在 6 条轨迹上 5 条劣于静态 P4（最差 −16%）、1 条打平，故不上线；默认档为 P4。
@@ -13,7 +16,9 @@ Rust 实现。**结论：非平稳负载下存在逐阶段 oracle gap（预注�
 | [docs/M1-ORACLE.md](docs/M1-ORACLE.md) | M1/M1.1 实测与结案依据：纯达标口径 gap 0%，可用性口径聚合 ~1% |
 | [docs/REPLAY-TRACES.md](docs/REPLAY-TRACES.md) | 真实/生成 trace 回放与预注册批次（4/6 ≥5%） |
 | [docs/M2-RESULT.md](docs/M2-RESULT.md) | M2 规则控制器实测：5/6 劣于静态档，判定不上线 |
-| [docs/EXEC.md](docs/EXEC.md) | 执行层 v0：策略跑在 tokio 任务上，console 可观测 |
+| [docs/EXEC.md](docs/EXEC.md) | 执行层：tokio 任务上的准入/拒绝/抢占/换出，A/B 读数 |
+| [docs/PROCESS.md](docs/PROCESS.md) | 流程：判据分级、基线纪律、发布与回滚 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 提交前四件套与规则 |
 | [docs/SCHEDULER.md](docs/SCHEDULER.md) | 现有内核模型与实测读数 |
 | [docs/TOOLING.md](docs/TOOLING.md) | 观测工具矩阵与实测证据 |
 

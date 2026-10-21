@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 # 工具面门禁：逐个 feature 真跑一遍，判据不达标就红。
-# 用法：bash scripts/gate.sh [--skip-hotpath]
+# 用法：bash scripts/gate.sh [--skip-hotpath] [--skip-dial9]
 #
 # 每个 feature 构建后把二进制快照到 tmp/，避免后一步的构建覆盖前一步的产物；
 # 之前出现过"跑到的其实是上一个 feature 的二进制"导致的偶发假绿/假红。
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
+
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;;
+  *) EXE="" ;;
+esac
+
+skip_hotpath=0
+skip_dial9=0
+for arg in "$@"; do
+  case "$arg" in
+    --skip-hotpath) skip_hotpath=1 ;;
+    --skip-dial9) skip_dial9=1 ;;
+    *) echo "未知参数: $arg"; exit 2 ;;
+  esac
+done
 
 tmp=${TMPDIR:-/tmp}/lacbs-gate
 mkdir -p "$tmp"
@@ -22,8 +37,8 @@ build_harness() {
     fail=1
     return 1
   fi
-  cp target/debug/harness.exe "$tmp/harness-$name.exe" || return 1
-  echo "$tmp/harness-$name.exe"
+  cp "target/debug/harness$EXE" "$tmp/harness-$name$EXE" || return 1
+  echo "$tmp/harness-$name$EXE"
 }
 
 step "0. 基线（无工具）"
@@ -37,7 +52,7 @@ cargo build -q -p lacbs-console-probe || red "探针构建失败"
 timeout 60 "$cons" --secs 10 --tasks 16 --mode mixed > /dev/null 2>&1 &
 hp=$!
 sleep 2
-timeout 60 ./target/debug/console-probe.exe --secs 3 > "$tmp/probe.out" 2>&1
+timeout 60 ./target/debug/console-probe$EXE --secs 3 > "$tmp/probe.out" 2>&1
 rc=$?
 cat "$tmp/probe.out"
 [ "$rc" -eq 0 ] || red "console 探针退出码 $rc"
@@ -54,6 +69,7 @@ mixed=$(timeout 60 "$live" --secs 3 --workers 4 --tasks 8 --mode mixed 2>/dev/nu
 echo "$mixed"
 echo "$mixed" | grep -q '"stalls":0' || red "正常场景误报"
 
+if [ "$skip_dial9" -eq 0 ]; then
 step "3. dial9：必须产出可解码的 trace，且 poll 事件有量"
 d9=$(build_harness dial9 --features lacbs-obs/dial9) || exit 1
 rm -rf traces
@@ -65,12 +81,13 @@ workers=$(grep -o '"worker_cardinality": [0-9]*' traces/shape.json | grep -o '[0
 [ -n "$polls" ] && [ "$polls" -gt 100 ] || red "poll 事件太少: ${polls:-无}"
 [ -n "$workers" ] && [ "$workers" -eq 4 ] || red "worker 数不对: ${workers:-无}"
 echo "PollStartEvent=$polls worker_cardinality=$workers"
+fi
 
 step "4. 调度器内核：异质 SLO 下截止期策略必须减少交互式违约"
 cargo test -q -p lacbs-core > "$tmp/core-test.out" 2>&1 || red "内核测试失败，见 $tmp/core-test.out"
 cargo build -q -p lacbs-sim || red "sim 构建失败"
-fifo=$(./target/debug/sim.exe --policy fifo)
-edf=$(./target/debug/sim.exe --policy deadline)
+fifo=$(./target/debug/sim$EXE --policy fifo)
+edf=$(./target/debug/sim$EXE --policy deadline)
 echo "$fifo"
 echo "$edf"
 f=$(echo "$fifo" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
@@ -82,7 +99,7 @@ elif [ "$e" -ge "$f" ]; then
 fi
 
 # 拒绝：无望的直接丢，被服务的人必须全部达标
-rej=$(./target/debug/sim.exe --policy deadline --reject)
+rej=$(./target/debug/sim$EXE --policy deadline --reject)
 echo "$rej"
 r=$(echo "$rej" | grep -o '"rejected":[0-9]*' | cut -d: -f2)
 m=$(echo "$rej" | grep -o '"ttft_misses":[0-9]*' | head -1 | cut -d: -f2)
@@ -90,8 +107,8 @@ m=$(echo "$rej" | grep -o '"ttft_misses":[0-9]*' | head -1 | cut -d: -f2)
 [ "${m:-1}" -eq 0 ] || red "拒绝后被服务的仍有首字违约: $m"
 
 # 抢占：批处理占满槽位后才到的交互式，必须从"等"变成"挤"
-base=$(./target/debug/sim.exe --policy deadline --scenario flood --late-interactive 4)
-pre=$(./target/debug/sim.exe --policy deadline --scenario flood --late-interactive 4 --preempt)
+base=$(./target/debug/sim$EXE --policy deadline --scenario flood --late-interactive 4)
+pre=$(./target/debug/sim$EXE --policy deadline --scenario flood --late-interactive 4 --preempt)
 echo "$base"
 echo "$pre"
 bm=$(echo "$base" | grep -o '"interactive":{[^}]*}' | grep -o '"ttft_misses":[0-9]*' | cut -d: -f2)
@@ -103,7 +120,7 @@ pc=$(echo "$pre" | grep -o '"preemptions":[0-9]*' | cut -d: -f2)
 
 step "5. M1 扫描：oracle 必须不低于最好固定策略，且 5 条轨迹都要跑出来"
 cargo build -q -p lacbs-sim || red "sim 构建失败"
-if ./target/debug/sim.exe --sweep --kv-tokens 6000 --retry-pct 80 --retry-delay-us 50000 --max-attempts 3 --reject-penalty 1 > "$tmp/sweep.out" 2>&1; then
+if ./target/debug/sim$EXE --sweep --kv-tokens 6000 --retry-pct 80 --retry-delay-us 50000 --max-attempts 3 --reject-penalty 1 > "$tmp/sweep.out" 2>&1; then
   n=$(grep -c '^SUMMARY' "$tmp/sweep.out")
   [ "$n" -eq 5 ] || red "SUMMARY 条数 $n != 5"
   if ! awk '/^SUMMARY/ {
@@ -122,7 +139,7 @@ else
 fi
 
 step "6. 真实 trace 回放（fixture）：5 个 profile 都要跑完且 oracle ≥ best"
-if ./target/debug/sim.exe --replay-csv tests/fixtures/burstgpt_sample.csv --max-queue 1024 --target-load 0.6 --phases 3 --reject-penalty 1 > "$tmp/replay.out" 2>&1; then
+if ./target/debug/sim$EXE --replay-csv tests/fixtures/burstgpt_sample.csv --max-queue 1024 --target-load 0.6 --phases 3 --reject-penalty 1 > "$tmp/replay.out" 2>&1; then
   n=$(grep -c '^ROW' "$tmp/replay.out")
   [ "$n" -eq 5 ] || red "回放 ROW 条数 $n != 5"
   [ "$(grep -c '^SUMMARY' "$tmp/replay.out")" -eq 1 ] || red "回放 SUMMARY 条数不对"
@@ -142,7 +159,7 @@ else
 fi
 
 step "7. M2 控制器（fixture）：必须跑完且切换次数 ≤ 窗口数"
-if ./target/debug/sim.exe --replay-csv tests/fixtures/burstgpt_sample.csv --adaptive --window-s 2     --decode-us 2000 --max-queue 512 --target-load 0.8 --phases 3 --reject-penalty 1 > "$tmp/adaptive.out" 2>&1; then
+if ./target/debug/sim$EXE --replay-csv tests/fixtures/burstgpt_sample.csv --adaptive --window-s 2     --decode-us 2000 --max-queue 512 --target-load 0.8 --phases 3 --reject-penalty 1 > "$tmp/adaptive.out" 2>&1; then
   grep -q '^ADAPTIVE' "$tmp/adaptive.out" || red "没有 ADAPTIVE 输出"
   sw=$(grep -o 'switches=[0-9]*' "$tmp/adaptive.out" | cut -d: -f2 | cut -d= -f2)
   win=$(grep -o 'windows=[0-9]*' "$tmp/adaptive.out" | cut -d: -f2 | cut -d= -f2)
@@ -154,7 +171,7 @@ fi
 
 step "8. 执行层：内核策略跑在 tokio 任务上，必须全部交代且无停滞"
 cargo build -q -p lacbs-exec || red "exec 构建失败"
-out=$(timeout 60 ./target/debug/exec.exe --secs 2 --tasks 64 2>/dev/null | tail -1)
+out=$(timeout 60 ./target/debug/exec$EXE --secs 2 --tasks 64 2>/dev/null | tail -1)
 echo "$out"
 c=$(echo "$out" | grep -o '"completed":[0-9]*' | cut -d: -f2)
 r=$(echo "$out" | grep -o '"rejected":[0-9]*' | cut -d: -f2)
@@ -166,7 +183,7 @@ elif [ "$((c + r))" -ne "$t" ]; then
 fi
 echo "$out" | grep -q '"stalls":0' || red "执行层出现停滞"
 
-if [ "${1:-}" != "--skip-hotpath" ]; then
+if [ "$skip_hotpath" -eq 0 ]; then
   step "9. hotpath：报告里必须出现被插桩的函数"
   hp_bin=$(build_harness hotpath --features hotpath) || exit 1
   timeout 60 "$hp_bin" --secs 2 --tasks 8 --mode mixed 2>&1 | grep -q "harness::burn" \
