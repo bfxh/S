@@ -100,12 +100,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Fetch pinned trit release
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install trit from crates.io
         run: |
-          curl -fsSL -o trit.tar.gz https://github.com/bfxh/trit/releases/download/v0.3.2/trit-linux-x86_64.tar.gz
-          echo "e9b0374f5624b05c3685a929e824bb997886d48d9adb130f841d15a964d4cea1  trit.tar.gz" | sha256sum -c -
-          tar -xzf trit.tar.gz
+          cargo install trit-cli --version 0.3.2 --locked --root "$RUNNER_TEMP/trit"
+          echo "$RUNNER_TEMP/trit/bin" >> "$GITHUB_PATH"
       - name: Verify admission policy (SAT)
-        run: ./trit-linux-x86_64 verify policy/admission.json
+        run: trit verify policy/admission.json
       - name: Verify admission policy (BDD)
-        run: ./trit-linux-x86_64 verify --engine bdd policy/admission.json
+        run: trit verify --engine bdd policy/admission.json
