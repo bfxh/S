@@ -122,11 +122,14 @@ fixture（`tests/fixtures/ternary_admission_{k3,b3}.csv`）是 trit 的输出，
 py -3.11 scripts/gen_ternary_fixture.py --trit D:/KF/trit/target/release/trit.exe
 ```
 
-CI **不把 trit 引入 cargo 依赖图**：`deny.toml` 仍是 `unknown-git = "deny"`，而 `trit-core` 未发布到
-crates.io。fixture 把工具的判定固化下来，测试只断言语义性质，不重实现三值求值器。
+CI **不把 trit 引入 cargo 依赖图**：`deny.toml` 仍是 `unknown-git = "deny"`，运行时不依赖 trit
+（`trit-core` 虽已发布到 crates.io，这里仍只用 fixture 固化工具的判定，测试只断言语义性质，
+不重实现三值求值器）。
 
 独立策略门（`policy (trit verify)`）走另一条线：从 crates.io 安装固定版本
-`trit-cli 0.3.2`（crates.io 版本不可变），对 `policy/admission.json` 跑 SAT/BDD 两遍。
+`trit-cli 0.11.0`，对 `policy/admission.json` 跑 SAT/BDD 两遍。固定版本**仍可能被上游 yank**
+（`0.3.2` 已被 yank，`cargo install` 会直接报 `has been yanked`），所以 nightly 会定期跑到它；
+升级前先查 `https://index.crates.io/tr/it/trit-cli` 的 `yanked` 字段。
 它不进依赖图、不需要 git 源，失败会让 CI 判红；fixture 测运行时布尔表，策略门测规格本身。
 变异复算：删掉 `contended` 条件 ⇒ `reject_decision_table` 红；把 K3 的 `1,X,0,1` 改成 `X` ⇒
 两个 K3 测试红。
