@@ -104,7 +104,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install trit from crates.io
         run: |
-          cargo install trit-cli --version 0.3.2 --locked --root "$RUNNER_TEMP/trit"
+          cargo install trit-cli --version 0.11.0 --locked --root "$RUNNER_TEMP/trit"
           echo "$RUNNER_TEMP/trit/bin" >> "$GITHUB_PATH"
       - name: Verify admission policy (SAT)
         run: trit verify policy/admission.json
